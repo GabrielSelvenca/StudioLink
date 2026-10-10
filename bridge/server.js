@@ -519,12 +519,20 @@ const crypto = require('crypto');
 
 // sobe uma imagem e devolve o rbxassetid que vai em ImageLabel.Image / Texture.Texture (com cache por conteúdo)
 async function uploadImage(cmd) {
-  const file = path.resolve(ROOT, String(cmd.file || ''));
+  let file = path.resolve(ROOT, String(cmd.file || ''));
   if (!fs.existsSync(file)) return { ok: false, error: 'arquivo não existe: ' + file };
+  if (/\.svg$/i.test(file)) { // Roblox não aceita SVG: converte pra PNG 512 do lado
+    try {
+      const { Resvg } = require('@resvg/resvg-js');
+      const png = new Resvg(fs.readFileSync(file, 'utf8'), { fitTo: { mode: 'width', value: Number(cmd.size) || 512 } }).render().asPng();
+      file = file.replace(/\.svg$/i, '.png');
+      fs.writeFileSync(file, png);
+    } catch (e) { return { ok: false, error: 'não consegui converter o SVG: ' + e.message }; }
+  }
   const hash = crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex');
   const cached = Assets.uploadedGet(hash);
   if (cached && cached.imageUri && !cmd.force) return { ok: true, ...cached, cache: true };
-  const up = await uploadAsset({ file: cmd.file, name: cmd.name, description: cmd.description });
+  const up = await uploadAsset({ file, name: cmd.name, description: cmd.description });
   if (!up.ok) return up;
   // o Open Cloud devolve o id do Decal; a imagem de verdade sai lendo o Decal no Studio
   let info = null, lastErr = '';

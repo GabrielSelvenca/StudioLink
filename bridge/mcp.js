@@ -191,7 +191,7 @@ const TOOLS = [
   },
   {
     name: 'studio_image_upload',
-    description: 'Sobe uma imagem do projeto (png/jpg; ex.: baixada da internet pra assets/refs/) pro Roblox e devolve imageUri (rbxassetid://...) pra ImageLabel/Decal/Texture. Tem cache: a mesma imagem não sobe duas vezes.',
+    description: 'Sobe uma imagem do projeto (png/jpg/svg; ex.: baixada da internet pra assets/refs/) pro Roblox e devolve imageUri (rbxassetid://...) pra ImageLabel/Decal/Texture. Tem cache: a mesma imagem não sobe duas vezes.',
     inputSchema: { type: 'object', properties: {
       file: { type: 'string', description: 'Caminho no projeto, ex.: assets/refs/fundo.png' },
       name: { type: 'string' },
