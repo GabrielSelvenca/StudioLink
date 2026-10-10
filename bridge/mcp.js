@@ -153,6 +153,52 @@ const TOOLS = [
     cmd: (a) => ({ timeout: 240, cmd: { type: 'upload', file: a.file, name: a.name, insert: a.insert !== undefined ? a.insert : /\.(fbx|glb|gltf|obj)$/i.test(a.file || ''), parent: a.parent } }),
   },
   {
+    name: 'studio_icon_search',
+    description: 'Procura ícones na biblioteca local do StudioLink (5500+: Fluent Emoji coloridos + game-icons silhuetas). Busque em INGLÊS com 1–2 palavras (coin, money bag, sword, brain, gem, lock, gear, trophy, shop, heart, star). style "color" = ícone colorido pronto; "silhouette" = desenho de uma cor que você pinta com color.',
+    inputSchema: { type: 'object', properties: {
+      query: { type: 'string', description: 'Palavras em inglês.' },
+      style: { type: 'string', enum: ['color', 'silhouette'], description: 'Filtra o tipo (opcional).' },
+      limit: { type: 'number', description: 'Máximo de resultados (padrão 20).' },
+    }, required: ['query'] },
+    cmd: (a) => ({ cmd: { type: 'icons', query: a.query, style: a.style, limit: a.limit } }),
+  },
+  {
+    name: 'studio_icon',
+    description: 'Gera o PNG de um ícone da biblioteca no estilo de jogo (contorno grosso + sombra), salva em assets/icons/ e, com upload:true, sobe pro Roblox e devolve imageUri (rbxassetid://...) pra pôr em ImageLabel.Image. Mesma imagem não sobe duas vezes (cache).',
+    inputSchema: { type: 'object', properties: {
+      id: { type: 'string', description: 'Id do studio_icon_search, ex.: fluent/money-bag, gi/brain.' },
+      color: { type: 'string', description: 'Cor "#hex" (só pra silhueta; ganha degradê automático).' },
+      outline: { type: 'string', description: 'Cor do contorno "#hex" (padrão #000000) ou "none".' },
+      thick: { type: 'number', description: 'Espessura do contorno (padrão 14, numa imagem de 512).' },
+      shadow: { type: 'number', description: 'Sombra embaixo em px (padrão 10; 0 = sem).' },
+      size: { type: 'number', description: 'Tamanho do PNG (padrão 512).' },
+      name: { type: 'string', description: 'Nome do arquivo/asset.' },
+      upload: { type: 'boolean', description: 'Sobe pro Roblox e devolve imageUri.' },
+    }, required: ['id'] },
+    cmd: (a) => ({ timeout: 240, cmd: { type: 'icon', ...a } }),
+  },
+  {
+    name: 'studio_texture',
+    description: 'Gera textura repetível (studs, grid, dots, stripes, checker) na cor pedida, salva em assets/textures/ e, com upload:true, devolve imageUri pra usar num objeto Texture (StudsPerTileU/V = 1 pra studs).',
+    inputSchema: { type: 'object', properties: {
+      kind: { type: 'string', enum: ['studs', 'grid', 'dots', 'stripes', 'checker'] },
+      color: { type: 'string', description: 'Cor base "#hex".' },
+      size: { type: 'number', description: 'Pixels do tile (padrão 256).' },
+      name: { type: 'string' },
+      upload: { type: 'boolean' },
+    }, required: ['kind'] },
+    cmd: (a) => ({ timeout: 240, cmd: { type: 'texture', ...a } }),
+  },
+  {
+    name: 'studio_image_upload',
+    description: 'Sobe uma imagem do projeto (png/jpg; ex.: baixada da internet pra assets/refs/) pro Roblox e devolve imageUri (rbxassetid://...) pra ImageLabel/Decal/Texture. Tem cache: a mesma imagem não sobe duas vezes.',
+    inputSchema: { type: 'object', properties: {
+      file: { type: 'string', description: 'Caminho no projeto, ex.: assets/refs/fundo.png' },
+      name: { type: 'string' },
+    }, required: ['file'] },
+    cmd: (a) => ({ timeout: 240, cmd: { type: 'image', file: a.file, name: a.name } }),
+  },
+  {
     name: 'studio_insert_asset',
     description: 'Insere no Studio um asset do Roblox pelo id (modelo, mesh, decal, áudio). Para Decal devolve imageUri (use em ImageLabel.Image, SurfaceAppearance.ColorMap, Texture.Texture).',
     inputSchema: { type: 'object', properties: {

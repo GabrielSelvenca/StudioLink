@@ -38,12 +38,25 @@ studiolink upload modelo.fbx --insert sobe pro Roblox (Open Cloud) e insere
 studiolink selftest                   testa a ponte inteira
 studiolink restart                    recarrega o servidor do projeto
 studiolink key                        salva a chave da Open Cloud
+studiolink icons coin                 procura ícones na biblioteca local (5500+)
+studiolink icon fluent/coin --upload  gera o PNG com contorno e devolve o rbxassetid
+studiolink texture studs --color "#3aa0ff" --upload   textura de studs
+studiolink image assets/refs/x.png    sobe qualquer imagem e devolve o rbxassetid
 ```
 `studiolink help` lista tudo.
 
 ## Atualizar
 Na pasta do StudioLink: edite, `git commit`, `git push` e rode o `install.cmd` de novo
 (ele atualiza o plugin e o MCP). Nos projetos abertos: `studiolink restart`.
+
+## Imagens
+A biblioteca fica em `library/` (fora do git; o `install.cmd` baixa, ou `studiolink library`):
+- **Fluent Emoji** (Microsoft, MIT): ~1600 ícones coloridos, sem crédito obrigatório.
+- **game-icons.net** (CC BY 3.0): ~4000 silhuetas pra pintar em qualquer cor. Se usar, ponha
+  "Ícones: game-icons.net" nos créditos do jogo.
+
+Os PNGs gerados vão pra `assets/icons` e `assets/textures` do projeto. Imagens já enviadas ficam em
+`library/uploaded.json` e não sobem de novo.
 
 ## Como funciona
 ```

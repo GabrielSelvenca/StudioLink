@@ -29,6 +29,13 @@ const HELP = `StudioLink — comandos de projeto (rode na pasta do jogo)
   upload <arquivo> [--name N] [--insert] [--parent P]        sobe fbx/png/mp3 pro Roblox (Open Cloud)
   insert <assetId> [--parent P] [--name N]                  insere um asset no Studio
 
+  IMAGENS (ícones, texturas, referências)
+  icons <busca em inglês> [--style color|silhouette]         procura na biblioteca local (coin, sword, brain...)
+  icon <id> [--color #hex] [--outline #hex|none] [--thick N] [--upload]
+                                                             gera PNG em assets/icons (com --upload: devolve rbxassetid)
+  texture studs|grid|dots|stripes|checker [--color #hex] [--upload]   textura repetível em assets/textures
+  image <arquivo.png> [--name N]                             sobe uma imagem e devolve o rbxassetid (com cache)
+
   CÓDIGO
   run <arquivo.luau | ->         executa Luau no Studio (- = lê do stdin)
   eval "<código>"                executa uma linha de Luau
@@ -89,7 +96,7 @@ const fmt = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 async function main() {
   const { pos, flags } = parse(process.argv.slice(2));
   const sub = pos.shift();
-  const timeout = Number(flags.timeout) || ({ selftest: 180, fuzz: (Number(pos[0]) || 40) + 150, blender: 330, upload: 240 }[sub] || 60);
+  const timeout = Number(flags.timeout) || ({ selftest: 180, fuzz: (Number(pos[0]) || 40) + 150, blender: 330, upload: 240, image: 240, icon: 240, texture: 240 }[sub] || 60);
   const target = flags.target || 'edit';
   let cmd;
 
@@ -152,6 +159,21 @@ async function main() {
       break;
     }
     case 'upload': cmd = { type: 'upload', file: pos[0], name: typeof flags.name === 'string' ? flags.name : undefined, insert: !!flags.insert, parent: typeof flags.parent === 'string' ? flags.parent : undefined }; break;
+    case 'image': cmd = { type: 'image', file: pos[0], name: typeof flags.name === 'string' ? flags.name : undefined, force: !!flags.force }; break;
+    case 'icons': cmd = { type: 'icons', query: pos.join(' '), limit: Number(flags.limit) || 20, style: typeof flags.style === 'string' ? flags.style : undefined }; break;
+    case 'icon': {
+      if (!pos[0]) throw new Error('uso: icon <id> [--color #hex] [--outline #hex|none] [--thick N] [--shadow N] [--size N] [--name N] [--upload]');
+      cmd = { type: 'icon', id: pos[0], upload: !!flags.upload };
+      for (const k of ['color', 'outline', 'name']) if (typeof flags[k] === 'string') cmd[k] = flags[k];
+      for (const k of ['thick', 'shadow', 'size']) if (flags[k] !== undefined) cmd[k] = Number(flags[k]);
+      break;
+    }
+    case 'texture': {
+      cmd = { type: 'texture', kind: pos[0] || 'studs', upload: !!flags.upload };
+      for (const k of ['color', 'name']) if (typeof flags[k] === 'string') cmd[k] = flags[k];
+      if (flags.size !== undefined) cmd.size = Number(flags.size);
+      break;
+    }
     case 'insert': cmd = { type: 'insert', assetId: pos[0], parent: typeof flags.parent === 'string' ? flags.parent : undefined, name: typeof flags.name === 'string' ? flags.name : undefined }; break;
     case 'resync': cmd = { type: 'snapshot' }; break;
     case 'pushall': cmd = { type: 'pushall' }; break;
@@ -178,6 +200,7 @@ async function main() {
   if (r.text) console.log(r.text);
   if (r.report && r.report.length) console.log('blender: ' + JSON.stringify(r.report, null, 2));
   if (r.resumo) { console.log(JSON.stringify(r, null, 2)); process.exit(r.ok ? 0 : 1); }
+  if (r.icones) { for (const i of r.icones) console.log(`${i.id.padEnd(34)} ${i.style === 'color' ? 'colorido ' : 'silhueta '} ${i.name}`); if (!r.icones.length) console.log('nada achado (busque em inglês: coin, sword, brain, gem...)'); delete r.icones; }
   if (r.results) for (const t of r.results) console.log(`${t.ok ? '✓' : '✗'} ${t.teste}${t.info ? '  → ' + (typeof t.info === 'string' ? t.info : JSON.stringify(t.info)) : ''}`);
   if (r.returns && r.returns.length) console.log('→ ' + r.returns.map(fmt).join(', '));
   const rest = { ...r };

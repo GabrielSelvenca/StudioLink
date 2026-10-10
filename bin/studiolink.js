@@ -21,6 +21,7 @@ const HELP = `StudioLink ${VERSION} — liga o Claude Code ao Roblox Studio
   start                          liga o servidor do projeto (deixe a janela aberta)
   plugin                         instala/atualiza o plugin no Roblox Studio
   key                            salva a chave da Open Cloud (vale pra todos os projetos)
+  library                        baixa/atualiza a biblioteca de ícones (5500+, usa git)
   mcp                            servidor MCP (usado pelo Claude Code, não precisa rodar na mão)
   version                        versão instalada
 `;
@@ -150,6 +151,7 @@ async function saveKey(arg) {
 (async () => {
   switch (sub) {
     case 'key': return saveKey(process.argv[3]);
+    case 'library': return require('../bridge/assets').download();
     case 'env': return console.log(ensureEnv());
     case 'init': return init(process.argv.slice(3));
     case 'start': return start();

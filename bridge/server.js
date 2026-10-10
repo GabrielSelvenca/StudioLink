@@ -265,6 +265,14 @@ async function handleCmd(body) {
       return runBlender(cmd);
     case 'upload':
       return uploadAsset(cmd);
+    case 'image':
+      return uploadImage(cmd);
+    case 'icons':
+      return { ok: true, icones: Assets.search(String(cmd.query || ''), { limit: cmd.limit || 20, style: cmd.style }) };
+    case 'icon':
+      return makeIcon(cmd);
+    case 'texture':
+      return makeTexture(cmd);
     case 'restart': {
       log('reiniciando a pedido (studiolink start sobe de novo)');
       const tStop = Date.now();
@@ -501,6 +509,70 @@ async function uploadAsset(cmd) {
     const ins = await handleCmd({ timeout: 60, cmd: { type: 'insert', assetId, parent: cmd.parent, name: cmd.insertName || name, pivot: cmd.pivot } });
     out.insert = ins;
     if (!ins.ok) out.aviso = 'upload ok, mas inserir falhou (asset novo pode levar alguns segundos/minutos na moderação): ' + ins.error;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- imagens (ícones, texturas, referências)
+const Assets = require('./assets');
+const crypto = require('crypto');
+
+// sobe uma imagem e devolve o rbxassetid que vai em ImageLabel.Image / Texture.Texture (com cache por conteúdo)
+async function uploadImage(cmd) {
+  const file = path.resolve(ROOT, String(cmd.file || ''));
+  if (!fs.existsSync(file)) return { ok: false, error: 'arquivo não existe: ' + file };
+  const hash = crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex');
+  const cached = Assets.uploadedGet(hash);
+  if (cached && cached.imageUri && !cmd.force) return { ok: true, ...cached, cache: true };
+  const up = await uploadAsset({ file: cmd.file, name: cmd.name, description: cmd.description });
+  if (!up.ok) return up;
+  // o Open Cloud devolve o id do Decal; a imagem de verdade sai lendo o Decal no Studio
+  let info = null, lastErr = '';
+  const t0 = Date.now();
+  while (Date.now() - t0 < 90000) {
+    const r = await handleCmd({ timeout: 30, cmd: { type: 'insert', assetId: up.assetId, peek: true } });
+    if (r.ok && r.info && r.info.imageUri) { info = r.info; break; }
+    lastErr = r.error || 'sem imagem ainda';
+    await sleep(4000);
+  }
+  const out = { decalId: up.assetId, imageUri: info && info.imageUri, arquivo: path.relative(ROOT, file) };
+  if (!out.imageUri) return { ok: false, ...out, error: 'upload ok (Decal ' + up.assetId + '), mas não consegui ler a imagem ainda (moderação?): ' + lastErr + '. Tente "studiolink image" de novo em 1 min.' };
+  Assets.uploadedSet(hash, out);
+  return { ok: true, ...out };
+}
+
+function saveProjectImage(sub, name, png) {
+  const dir = path.join(ROOT, 'assets', sub);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, name.replace(/[^\w.-]+/g, '_') + '.png');
+  fs.writeFileSync(file, png);
+  return path.relative(ROOT, file);
+}
+
+async function makeIcon(cmd) {
+  let r;
+  try { r = Assets.icon(String(cmd.id || ''), cmd); } catch (e) { return { ok: false, error: e.message }; }
+  const name = cmd.name || r.it.id.split('/').pop() + (cmd.color ? '_' + String(cmd.color).replace('#', '') : '');
+  const file = saveProjectImage('icons', name, r.png);
+  const out = { ok: true, arquivo: file, fonte: r.it.id, licenca: r.license };
+  if (cmd.upload) {
+    const up = await uploadImage({ file, name });
+    if (!up.ok) return { ...out, ok: false, error: up.error };
+    Object.assign(out, { imageUri: up.imageUri, decalId: up.decalId, cache: up.cache });
+  }
+  return out;
+}
+
+async function makeTexture(cmd) {
+  let png;
+  try { png = Assets.texture(String(cmd.kind || 'studs'), cmd); } catch (e) { return { ok: false, error: e.message }; }
+  const name = cmd.name || String(cmd.kind || 'studs') + (cmd.color ? '_' + String(cmd.color).replace('#', '') : '');
+  const file = saveProjectImage('textures', name, png);
+  const out = { ok: true, arquivo: file, dica: 'use num Texture com StudsPerTileU/V = 1 (studs) ou o tamanho do tile em studs' };
+  if (cmd.upload) {
+    const up = await uploadImage({ file, name });
+    if (!up.ok) return { ...out, ok: false, error: up.error };
+    Object.assign(out, { imageUri: up.imageUri, decalId: up.decalId, cache: up.cache });
   }
   return out;
 }

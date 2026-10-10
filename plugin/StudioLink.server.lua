@@ -8,7 +8,7 @@
 	Instalação: copie este arquivo para %LOCALAPPDATA%\Roblox\Plugins
 ]]
 
-local VERSION = "1.4.0"
+local VERSION = "1.5.0"
 local DEFAULT_PORT = 34880
 
 local HttpService = game:GetService("HttpService")
@@ -1041,6 +1041,14 @@ function Fuzz.insert(cmd)
 	local ok, model = pcall(function() return game:GetService("InsertService"):LoadAsset(id) end)
 	if not ok then return { ok = false, error = "LoadAsset falhou: " .. tostring(model) .. " (o asset é seu e já foi aprovado pela moderação?)" } end
 	local created, info = {}, {}
+	if cmd.peek then -- só lê os ids (ex.: imagem de um Decal) sem colocar nada no place
+		for _, child in ipairs(model:GetDescendants()) do
+			if child:IsA("Decal") or child:IsA("Texture") then info.imageUri = child.Texture end
+			if child:IsA("MeshPart") then info.meshId = child.MeshID; info.textureId = child.TextureID end
+		end
+		model:Destroy()
+		return { ok = true, info = info }
+	end
 	local r = beginRec("Claude: insert " .. id)
 	for _, child in ipairs(model:GetChildren()) do
 		if cmd.name and #model:GetChildren() == 1 then child.Name = cmd.name end

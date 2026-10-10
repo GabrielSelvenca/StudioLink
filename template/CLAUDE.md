@@ -60,6 +60,13 @@ Helpers `B` dentro do `run`:
 `B.get("Workspace/Map/Spawn")` · `B.make(class, props, parent?)` · `B.find(root, nomeOuClasse)` ·
 `B.clear(path)` · `B.tree(path, prof)` · `B.path(inst)`
 
+## Imagens (ícones, texturas, referências)
+1. Ícone: `studio_icon_search` (inglês: coin, sword, brain...) → `studio_icon` com `upload: true` → `imageUri` no ImageLabel.
+2. Textura: `studio_texture` (studs, grid, dots, stripes, checker) com `upload: true` → objeto `Texture`.
+3. Não achou na biblioteca: procure na internet uma imagem com licença livre (CC0, CC BY, MIT), baixe com
+   `curl -L -o assets/refs/<nome>.png <url>`, anote fonte e licença em `assets/CREDITOS.md` e suba com `studio_image_upload`.
+   Nunca suba arte de outros jogos, marcas ou personagens conhecidos.
+
 ## Testar (você mesmo, sempre)
 1. `studiolink play test` (com jogador) ou `play run` (só servidor). Rodam numa cópia do place.
 2. `status` mostra `server` online e `client: via server`.
@@ -81,7 +88,7 @@ Depois de atualizar lá: `studiolink restart` aqui pra recarregar o servidor des
 
 ## Limitações atuais
 - Você não vê a tela. Valide por código (tamanhos, posições, propriedades) e peça print quando o visual importar.
-- Imagens/meshes novas precisam de upload (Open Cloud): chave no `.env` do projeto (`ROBLOX_API_KEY`, `ROBLOX_USER_ID`).
+- Imagens/meshes novas precisam de upload (Open Cloud): chave salva com `studiolink key` (vale pra todos os projetos).
 
 ## Estilo do jogo
 (Preencher: paleta, fontes, corner radius padrão, estilo de UI e de build, convenções de código.)
