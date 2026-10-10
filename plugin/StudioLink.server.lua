@@ -1592,11 +1592,13 @@ if ROLE == "edit" then
 
 	-- cabeçalho
 	local header = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40), LayoutOrder = 1, Parent = root })
-	-- logo: elo quadrado (Studio) preso num elo redondo (Claude)
+	-- logo: bloco azul com furo (Studio) e o anel do Claude passando pelo furo
 	local logo = new("Frame", { Size = UDim2.fromOffset(32, 32), Position = UDim2.fromOffset(0, 4), BackgroundColor3 = Color3.fromRGB(18, 20, 28), Parent = header }, { corner(8) })
-	new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(12, 16), Size = UDim2.fromOffset(12, 12), Rotation = 15,
-		BackgroundTransparency = 1, Parent = logo }, { corner(3), new("UIStroke", { Color = Color3.fromRGB(30, 156, 255), Thickness = 3 }) })
-	new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(21, 16), Size = UDim2.fromOffset(12, 12),
+	local tile = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(12, 16), Size = UDim2.fromOffset(16, 16), Rotation = 15,
+		BackgroundColor3 = Color3.fromRGB(30, 150, 245), Parent = logo }, { corner(4) })
+	new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 7),
+		BackgroundColor3 = Color3.fromRGB(18, 20, 28), Parent = tile }, { corner(1) })
+	new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(19, 16), Size = UDim2.fromOffset(14, 14), ZIndex = 2,
 		BackgroundTransparency = 1, Parent = logo }, { new("UICorner", { CornerRadius = UDim.new(0.5, 0) }), new("UIStroke", { Color = ACCENT, Thickness = 3 }) })
 	local title = label({ text = "StudioLink", bold = true, size = 17, pos = UDim2.fromOffset(42, 2), sizeUDim = UDim2.new(1, -42, 0, 20) })
 	title.Parent = header
