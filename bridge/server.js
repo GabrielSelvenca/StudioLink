@@ -379,14 +379,18 @@ async function selftest() {
 // ---------------------------------------------------------------- Blender e assets (rodam neste PC)
 const { spawn: spawnProc } = require('child_process');
 
+// chaves: .env da pasta do StudioLink (vale pra todos os projetos, fora do git) < .env do projeto < variáveis do sistema
+const GLOBAL_ENV = path.join(__dirname, '..', '.env');
 function loadEnv() {
   const env = {};
-  try {
-    for (const line of fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split(/\r?\n/)) {
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-      if (m) env[m[1]] = m[2].replace(/^["']|["']$/g, '');
-    }
-  } catch {}
+  for (const file of [GLOBAL_ENV, path.join(ROOT, '.env')]) {
+    try {
+      for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+        const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+        if (m && m[2] !== '') env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+      }
+    } catch {}
+  }
   return { ...env, ...process.env };
 }
 
@@ -458,8 +462,8 @@ async function uploadAsset(cmd) {
   const key = env.ROBLOX_API_KEY;
   const userId = env.ROBLOX_USER_ID || CONFIG.creatorUserId;
   const groupId = env.ROBLOX_GROUP_ID || CONFIG.creatorGroupId;
-  if (!key) return { ok: false, error: 'falta ROBLOX_API_KEY no .env do projeto (Open Cloud, permissão assets:write)' };
-  if (!userId && !groupId) return { ok: false, error: 'falta ROBLOX_USER_ID (ou ROBLOX_GROUP_ID) no .env do projeto' };
+  if (!key) return { ok: false, error: 'falta ROBLOX_API_KEY em ' + GLOBAL_ENV + ' (Open Cloud, permissão Assets read+write)' };
+  if (!userId && !groupId) return { ok: false, error: 'falta ROBLOX_USER_ID (ou ROBLOX_GROUP_ID) em ' + GLOBAL_ENV };
   const file = path.resolve(ROOT, String(cmd.file || ''));
   if (!fs.existsSync(file)) return { ok: false, error: 'arquivo não existe: ' + file };
   const ext = path.extname(file).toLowerCase();

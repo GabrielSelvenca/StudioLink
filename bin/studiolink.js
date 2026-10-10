@@ -20,6 +20,7 @@ const HELP = `StudioLink ${VERSION} — liga o Claude Code ao Roblox Studio
   init [nome] [--port N]         prepara a pasta atual como projeto (studiolink.json, src/, CLAUDE.md)
   start                          liga o servidor do projeto (deixe a janela aberta)
   plugin                         instala/atualiza o plugin no Roblox Studio
+  key                            salva a chave da Open Cloud (vale pra todos os projetos)
   mcp                            servidor MCP (usado pelo Claude Code, não precisa rodar na mão)
   version                        versão instalada
 `;
@@ -125,8 +126,31 @@ function start() {
   run();
 }
 
+// chave da Open Cloud no .env da pasta do StudioLink (fora do git)
+function ensureEnv() {
+  const env = path.join(PKG, '.env');
+  if (!fs.existsSync(env)) fs.copyFileSync(path.join(PKG, '.env.example'), env);
+  return env;
+}
+async function saveKey(arg) {
+  const env = ensureEnv();
+  let key = arg;
+  if (!key) {
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    key = await new Promise((r) => rl.question('Cole a chave da Open Cloud e aperte Enter: ', (a) => { rl.close(); r(a); }));
+  }
+  key = String(key || '').trim();
+  if (!key) return console.log('nada salvo.');
+  let text = fs.readFileSync(env, 'utf8');
+  text = /^ROBLOX_API_KEY=.*$/m.test(text) ? text.replace(/^ROBLOX_API_KEY=.*$/m, 'ROBLOX_API_KEY=' + key) : text + '\r\nROBLOX_API_KEY=' + key + '\r\n';
+  fs.writeFileSync(env, text);
+  console.log('chave salva em ' + env + '. Nos projetos abertos: studiolink restart');
+}
+
 (async () => {
   switch (sub) {
+    case 'key': return saveKey(process.argv[3]);
+    case 'env': return console.log(ensureEnv());
     case 'init': return init(process.argv.slice(3));
     case 'start': return start();
     case 'plugin': return installPlugin();

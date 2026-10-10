@@ -37,6 +37,7 @@ studiolink blender script.py          roda Python no Blender (biblioteca rbx)
 studiolink upload modelo.fbx --insert sobe pro Roblox (Open Cloud) e insere
 studiolink selftest                   testa a ponte inteira
 studiolink restart                    recarrega o servidor do projeto
+studiolink key                        salva a chave da Open Cloud
 ```
 `studiolink help` lista tudo.
 
@@ -52,8 +53,8 @@ Claude Code ──(MCP / studiolink)──► servidor do projeto (localhost:por
 ```
 - Só aceita conexões locais e bloqueia requisições de navegador.
 - Ao reconectar nada é apagado; versões em conflito vão pra `.bridge/backup/`.
-- Upload de assets: crie uma API key em create.roblox.com → Open Cloud (permissão Assets) e ponha no `.env`
-  do projeto: `ROBLOX_API_KEY=...` e `ROBLOX_USER_ID=...`.
+- Upload de assets: crie uma User API Key em create.roblox.com → Open Cloud (permissão assets read + write) e rode
+  `studiolink key` (salva no `.env` da pasta do StudioLink, fora do git, e vale pra todos os projetos).
 
 ## Estrutura
 ```

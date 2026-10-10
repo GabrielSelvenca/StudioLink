@@ -16,6 +16,7 @@ echo [2/3] Instalando o plugin no Roblox Studio...
 call node bin\studiolink.js plugin || goto erro
 
 echo.
+if not exist .env copy .env.example .env >nul
 echo [3/3] Registrando o MCP no Claude Code (vale pra todos os projetos)...
 where claude >nul 2>nul
 if errorlevel 1 (
