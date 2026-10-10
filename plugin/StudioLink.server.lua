@@ -1053,6 +1053,13 @@ function Fuzz.insert(cmd)
 	for _, child in ipairs(model:GetChildren()) do
 		if cmd.name and #model:GetChildren() == 1 then child.Name = cmd.name end
 		child.Parent = parent
+		-- o import de FBX deixa o MeshPart com PivotOffset girado 90°: zera pra PivotTo/PrimaryPart não deitarem o modelo
+		for _, d in ipairs(child:IsA("BasePart") and { child } or child:GetDescendants()) do
+			if d:IsA("BasePart") then d.PivotOffset = CFrame.new() end
+		end
+		if child:IsA("Model") and not child.PrimaryPart then
+			child.PrimaryPart = child:FindFirstChildWhichIsA("BasePart", true)
+		end
 		table.insert(created, instPath(child))
 		if child:IsA("Decal") or child:IsA("Texture") then info.imageUri = child.Texture end
 		if child:IsA("MeshPart") then info.meshId = child.MeshID; info.textureId = child.TextureID end
