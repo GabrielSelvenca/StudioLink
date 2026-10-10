@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(studiolink:*)",
+      "mcp__studiolink",
+      "Edit(src/**)",
+      "Write(src/**)",
+      "Edit(tools/**)",
+      "Write(tools/**)"
+    ]
+  }
+}
