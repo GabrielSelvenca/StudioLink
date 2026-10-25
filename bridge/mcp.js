@@ -96,7 +96,7 @@ const TOOLS = [
   },
   {
     name: 'studio_run_luau',
-    description: 'Executa Luau no Studio (permissão de plugin) e devolve prints, retornos e erros. Use pra lógica que os comandos de objeto não cobrem (geração procedural, cálculos, APIs). Helpers: B.get(path), B.make(class, props, parent), B.find(root, nomeOuClasse), B.clear(path), B.path(inst). Durante playtest, target "server" ou "client".',
+    description: 'Executa Luau no Studio (permissão de plugin) e devolve prints, retornos e erros. Use pra lógica que os comandos de objeto não cobrem (geração procedural, cálculos, APIs). Helpers: B.get(path), B.make(class, props, parent), B.find(root, nomeOuClasse), B.clear(path), B.path(inst). Durante playtest, target "server" ou "client". O código roda na thread do plugin: loop longo PRECISA de task.wait() periódico, senão trava o plugin inteiro (sync, status, outros comandos) até fechar o Studio. O timeout só para de esperar, não cancela o código.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -112,7 +112,7 @@ const TOOLS = [
     name: 'studio_play',
     description: 'Controla o playtest: "test" (Play com jogador), "run" (só servidor), "stop". Roda numa cópia do place: nada do teste fica salvo.',
     inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['test', 'run', 'stop'] } }, required: ['action'] },
-    cmd: (a) => ({ timeout: 30, cmd: { type: 'play', action: a.action } }),
+    cmd: (a) => ({ timeout: 120, cmd: { type: 'play', action: a.action } }),
   },
   {
     name: 'studio_logs',

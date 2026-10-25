@@ -7,6 +7,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const { findRoot, VERSION } = require('./project');
 const ROOT = path.resolve(process.env.BRIDGE_ROOT || findRoot() || process.cwd());
@@ -35,12 +36,18 @@ const log = (...a) => {
 // edit = Studio em modo edição | server/client = DataModels de um playtest
 const roles = new Map();
 function getRole(name) {
-  if (!roles.has(name)) roles.set(name, { queue: [], waiter: null, lastSeen: 0, online: false });
+  if (!roles.has(name)) roles.set(name, { queue: [], waiter: null, lastSeen: 0, online: false, running: new Map() });
   return roles.get(name);
 }
 function isOnline(name) {
   const r = roles.get(name);
   return !!r && (r.waiter !== null || Date.now() - r.lastSeen < ONLINE_MS);
+}
+// Comando entregue que ainda não voltou (o mais antigo). Timeout não cancela nada no Studio: o código segue rodando.
+function busy(name) {
+  const r = roles.get(name);
+  const first = r && r.running.values().next().value;
+  return first ? `${first.label} há ${Math.round((Date.now() - first.t) / 1000)}s` : '';
 }
 function json(res, code, body) {
   if (res.writableEnded) return;
@@ -69,15 +76,18 @@ function call(name, cmd, timeoutMs = 60000) {
   return new Promise((resolve) => {
     cmd.reply = true;
     cmd.id = String(nextId++);
+    const r = getRole(name);
     const timer = setTimeout(() => {
       pending.delete(cmd.id);
-      const q = getRole(name).queue;
-      const i = q.indexOf(cmd);
-      if (i >= 0) q.splice(i, 1);
-      resolve({ ok: false, error: `timeout: Studio (${name}) não respondeu em ${timeoutMs / 1000}s` });
+      const i = r.queue.indexOf(cmd);
+      if (i >= 0) { r.queue.splice(i, 1); r.running.delete(cmd.id); }
+      const b = busy(name);
+      resolve({ ok: false, error: `timeout: Studio (${name}) não respondeu em ${timeoutMs / 1000}s` +
+        (b ? `. Ainda rodando lá: ${b}. O timeout não cancela o código, e um loop sem task.wait() trava o plugin inteiro.` : '') });
     }, timeoutMs);
     pending.set(cmd.id, { resolve, timer });
-    getRole(name).queue.push(cmd);
+    r.running.set(cmd.id, { label: cmd.type === 'run' ? `run ${cmd.name || ''}` : cmd.type, t: Date.now() });
+    r.queue.push(cmd);
     flush(name);
   });
 }
@@ -92,13 +102,27 @@ function addLog(role, kind, msg) {
 
 // ---------------------------------------------------------------- sync de scripts
 const known = new Map(); // caminho relativo (a/b/c.server.luau) -> conteúdo sincronizado
+// caminho -> hashes das versões que já foram sincronizadas. Se o Studio volta com uma delas, ficou pra trás
+// (place reaberto da nuvem, escrita que o plugin nunca aplicou) e não pode sobrescrever o disco.
+const seen = new Map();
+const hash = (src) => crypto.createHash('sha1').update(src).digest('hex');
+function setKnown(rel, src) {
+  known.set(rel, src);
+  const list = seen.get(rel) || [];
+  const h = hash(src);
+  if (!list.includes(h)) { list.push(h); if (list.length > 200) list.shift(); seen.set(rel, list); }
+}
 const STATE = path.join(ROOT, '.bridge', 'state.json');
-try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(STATE, 'utf8')).known || {})) known.set(k, v); } catch {}
+try {
+  const saved = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+  for (const [k, v] of Object.entries(saved.seen || {})) seen.set(k, v);
+  for (const [k, v] of Object.entries(saved.known || {})) setKnown(k, v);
+} catch {}
 let saveTimer = null;
 function saveState() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { fs.writeFileSync(STATE, JSON.stringify({ known: Object.fromEntries(known) })); } catch {}
+    try { fs.writeFileSync(STATE, JSON.stringify({ known: Object.fromEntries(known), seen: Object.fromEntries(seen) })); } catch {}
   }, 300);
 }
 
@@ -125,14 +149,15 @@ function removeEmptyDirs(dir) {
   for (const e of entries) if (e.isDirectory()) removeEmptyDirs(path.join(dir, e.name));
   if (dir !== SRC) { try { fs.rmdirSync(dir); } catch {} }
 }
-function backup(rel, tag) {
+function backup(rel, tag, source) {
   const dst = path.join(BACKUP, tag, ...rel.split('/'));
   fs.mkdirSync(path.dirname(dst), { recursive: true });
-  fs.copyFileSync(toAbs(rel), dst);
+  if (source === undefined) fs.copyFileSync(toAbs(rel), dst);
+  else fs.writeFileSync(dst, source);
 }
 function writeLocal(rel, source) {
   const abs = toAbs(rel);
-  known.set(rel, source);
+  setKnown(rel, source);
   saveState();
   try { if (fs.readFileSync(abs, 'utf8') === source) return; } catch {}
   fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -151,39 +176,80 @@ function deleteLocal(rel) {
 }
 
 // Ao conectar (ou reconectar), junta Studio e disco usando o último estado sincronizado (known):
-// existe dos dois lados e só um mudou → esse lado vence; os dois mudaram → Studio vence e o disco vai pra backup.
+// Studio igual ao último sync → só o disco mudou, o disco vence sozinho.
+// Studio mudou (alguém editou no place, ou o place reabriu com versão velha) → o código não adivinha:
+// o painel do plugin pergunta e a versão que perde vai pra .bridge/backup. Até lá o arquivo não sincroniza.
 // Existe só de um lado → copia pro outro (nunca apaga na reconexão). Nada é perdido.
+function winner(s, d, k) {
+  if (s === d) return 'iguais';
+  if (s === k) return 'disco';
+  return 'perguntar';
+}
+let undecided = new Map(); // caminho -> versão do Studio, esperando a escolha no painel
+const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+function resolveChoice(choice, files) {
+  const tag = stamp();
+  let n = 0;
+  for (const f of files) {
+    if (!undecided.has(f.file)) continue;
+    const s = typeof f.source === 'string' ? f.source : undecided.get(f.file);
+    undecided.delete(f.file);
+    const abs = toAbs(f.file);
+    if (choice === 'studio') {
+      if (fs.existsSync(abs)) backup(f.file, tag);
+      writeLocal(f.file, s);
+    } else {
+      let d;
+      try { d = fs.readFileSync(abs, 'utf8'); } catch { continue; }
+      backup(f.file, tag + '/studio', s);
+      setKnown(f.file, d);
+      enqueue('edit', { type: 'write', file: f.file, source: d });
+    }
+    n++;
+  }
+  saveState();
+  log(`escolha no Studio: ${choice === 'studio' ? 'manter o Studio' : 'usar o disco'} em ${n} scripts | a outra versão ficou em .bridge/backup/${tag}`);
+  return { ok: true, resolvidos: n };
+}
 function applySnapshot(scripts) {
-  const tag = new Date().toISOString().replace(/[:.]/g, '-');
+  const tag = stamp();
+  undecided = new Map();
+  const perguntar = [];
   const S = new Map();
   for (const s of scripts) { toAbs(s.file); S.set(s.file, s.source); }
   const D = new Map();
   for (const rel of walk(SRC)) D.set(rel, fs.readFileSync(toAbs(rel), 'utf8'));
   const files = new Set([...S.keys(), ...D.keys()]);
   const toStudio = [];
-  const st = { iguais: 0, studioParaDisco: 0, discoParaStudio: 0, apagados: 0, conflitos: 0, backup: 0 };
+  const st = { iguais: 0, studioParaDisco: 0, discoParaStudio: 0, perguntar: 0 };
   for (const rel of files) {
     const s = S.get(rel), d = D.get(rel), k = known.get(rel);
     if (s !== undefined && d !== undefined) {
-      if (s === d) { known.set(rel, s); st.iguais++; }
-      else if (d === k) { backup(rel, tag); st.backup++; writeLocal(rel, s); st.studioParaDisco++; }
-      else if (s === k) { known.set(rel, d); toStudio.push({ type: 'write', file: rel, source: d }); st.discoParaStudio++; }
-      else { backup(rel, tag); st.backup++; writeLocal(rel, s); st.conflitos++; log(`conflito em ${rel}: Studio venceu, versão do disco em .bridge/backup/${tag}`); }
+      const w = winner(s, d, k);
+      if (w === 'iguais') { setKnown(rel, s); st.iguais++; }
+      else if (w === 'disco') { setKnown(rel, d); toStudio.push({ type: 'write', file: rel, source: d }); st.discoParaStudio++; }
+      else {
+        undecided.set(rel, s);
+        // dica pro painel: o Studio tem uma versão que já foi sincronizada antes, então provavelmente ficou pra trás
+        perguntar.push({ file: rel, velho: (seen.get(rel) || []).includes(hash(s)) });
+        st.perguntar++;
+      }
     } else if (s !== undefined) {
       // só no Studio: vai pro disco. Na reconexão nunca se apaga nada (o Studio pode ser outra versão do place);
       // apagar só sincroniza ao vivo, com os dois lados conectados.
       writeLocal(rel, s); st.studioParaDisco++;
     } else {
       // só no disco: vai pro Studio
-      known.set(rel, d); toStudio.push({ type: 'write', file: rel, source: d }); st.discoParaStudio++;
+      setKnown(rel, d); toStudio.push({ type: 'write', file: rel, source: d }); st.discoParaStudio++;
     }
   }
   for (const rel of [...known.keys()]) if (!files.has(rel)) known.delete(rel);
+  for (const rel of [...seen.keys()]) if (!files.has(rel)) seen.delete(rel);
   removeEmptyDirs(SRC);
   saveState();
   for (const c of toStudio) enqueue('edit', c);
-  log(`snapshot: ${S.size} no Studio, ${D.size} no disco | ` + Object.entries(st).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join(' ') + (st.backup ? ` | backup em .bridge/backup/${tag}` : ''));
-  return { ok: true, scripts: S.size, ...st };
+  log(`snapshot: ${S.size} no Studio, ${D.size} no disco | ` + Object.entries(st).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join(' ') + (st.perguntar ? ' | esperando escolha no painel do Studio' : ''));
+  return { ok: true, scripts: S.size, ...st, perguntar };
 }
 
 function syncToStudio(cmd) {
@@ -197,6 +263,7 @@ function syncToStudio(cmd) {
 function onDiskChange(rel) {
   let abs, stat = null;
   try { abs = toAbs(rel); } catch { return; }
+  if (undecided.has(rel)) return; // esperando a escolha no painel; ela lê o disco na hora
   try { stat = fs.statSync(abs); } catch {}
   if (stat && stat.isDirectory()) { for (const f of walk(abs, rel)) onDiskChange(f); return; }
   if (!rel.endsWith('.luau')) {
@@ -210,7 +277,7 @@ function onDiskChange(rel) {
   let src;
   try { src = fs.readFileSync(abs, 'utf8'); } catch { return; }
   if (known.get(rel) === src) return;
-  known.set(rel, src);
+  setKnown(rel, src);
   saveState();
   syncToStudio({ type: 'write', file: rel, source: src });
 }
@@ -230,9 +297,13 @@ async function handleCmd(body) {
   switch (cmd.type) {
     case 'status': {
       const out = {};
-      for (const [name, r] of roles) out[name] = isOnline(name) ? `online (${r.place || '?'})` : 'offline';
+      for (const [name, r] of roles) {
+        const b = busy(name);
+        out[name] = isOnline(name) ? `online (${r.place || '?'})` + (b ? `, rodando ${b}` : '') : b ? `sem resposta, travado em ${b}?` : 'offline';
+      }
       if (isOnline('server') && !isOnline('client')) out.client = 'via server';
-      return { ok: true, projeto: PROJECT, porta: PORT, studio: out, src: SRC, scripts: known.size };
+      return { ok: true, projeto: PROJECT, porta: PORT, studio: out, src: SRC, scripts: known.size,
+        esperandoEscolha: undecided.size ? `${undecided.size} scripts diferentes entre Studio e disco: a pessoa escolhe no painel do StudioLink (não sincronizam até lá)` : undefined };
     }
     case 'logs': {
       let list = logs;
@@ -285,22 +356,31 @@ async function handleCmd(body) {
       const files = walk(SRC);
       for (const rel of files) {
         const src = fs.readFileSync(toAbs(rel), 'utf8');
-        known.set(rel, src);
+        setKnown(rel, src);
         enqueue('edit', { type: 'write', file: rel, source: src });
       }
       return { ok: true, pushed: files.length };
     }
-    case 'play': {
+    case 'play':
       if (cmd.action === 'stop' && isOnline('server')) return call('server', { type: 'play', action: 'endtest' }, timeout);
-      return call('edit', cmd, timeout);
-    }
+      if ((cmd.action === 'test' || cmd.action === 'run') && isOnline('edit')) {
+        const r = await call('edit', cmd, timeout);
+        // com vários Studios abertos o server do playtest pode levar mais de 1 min pra subir: só responde quando ele chega
+        for (let i = 0; r.ok && i < 180 && !isOnline('server'); i++) await sleep(500);
+        if (r.ok && !isOnline('server')) return { ok: false, error: 'o playtest abriu mas o server não conectou em 90s (veja o Output do Studio)' };
+        return r;
+      }
+      // senão segue pro default: vai pro edit, com a mesma checagem de offline/travado
     default: {
       // logo depois de um restart/recarregar plugin/iniciar playtest o papel pode demorar uns segundos pra voltar
-      for (let i = 0; i < 30 && !isOnline(target) && !(target === 'client' && isOnline('server')); i++) {
+      for (let i = 0; i < 30 && !isOnline(target) && !busy(target) && !(target === 'client' && isOnline('server')); i++) {
         await new Promise((r) => setTimeout(r, 500));
       }
       if (target === 'client' && !isOnline('client') && isOnline('server')) {
         return call('server', { ...cmd, relay: 'client' }, timeout); // client não faz HTTP: vai pelo server
+      }
+      if (!isOnline(target) && busy(target)) {
+        return { ok: false, error: `Studio (${target}) não responde: travado em ${busy(target)}. Responda o diálogo "not responding" do Studio ou feche o Studio.` };
       }
       if (!isOnline(target)) {
         return { ok: false, error: `Studio (${target}) offline. ` + (target === 'edit' ? 'Abra o Studio com o plugin ligado.' : 'Inicie um playtest primeiro.') };
@@ -321,6 +401,8 @@ async function selftest() {
   const REL = 'ServerStorage/__StudioLinkSelfTest.luau';
   const ABS = toAbs(REL);
   try {
+    check('reconexão: Studio mudado nunca sobrescreve o disco sozinho (pergunta no painel)',
+      winner('v1', 'v2', 'v1') === 'disco' && winner('v1', 'v2', 'v2') === 'perguntar' && winner('v3', 'v2', 'v1') === 'perguntar');
     check('Studio (edit) online', isOnline('edit'), 'abra o Studio com o plugin ligado');
     if (!isOnline('edit')) return { ok: false, results };
 
@@ -515,7 +597,6 @@ async function uploadAsset(cmd) {
 
 // ---------------------------------------------------------------- imagens (ícones, texturas, referências)
 const Assets = require('./assets');
-const crypto = require('crypto');
 
 // sobe uma imagem e devolve o rbxassetid que vai em ImageLabel.Image / Texture.Texture (com cache por conteúdo)
 async function uploadImage(cmd) {
@@ -684,7 +765,7 @@ async function handler(req, res) {
         if (r.rejected !== sid) { r.rejected = sid; log(`recusou ${place} [${sid}] no papel ${name}: ${r.place} [${r.owner}] já está ligado`); }
         return json(res, 409, { conflict: true, place: r.place });
       }
-      if (r.owner !== sid) r.flips = 0;
+      if (r.owner !== sid) { r.flips = 0; r.running.clear(); } // plugin novo: o que rodava no antigo morreu
       r.owner = sid;
       r.lastSeen = Date.now();
       if (!r.online) { r.online = true; log(`Studio (${name}) conectado: ${place} [${sid}]`); }
@@ -698,10 +779,10 @@ async function handler(req, res) {
       if (r.queue.length) return json(res, 200, r.queue.splice(0));
       const w = { res };
       w.timer = setTimeout(() => {
-        if (r.waiter === w) { r.waiter = null; r.lastSeen = Date.now(); json(res, 200, []); }
+        if (r.waiter === w) { r.waiter = null; json(res, 200, []); } // lastSeen só muda com /poll de verdade
       }, POLL_HOLD_MS);
       r.waiter = w;
-      res.on('close', () => { if (r.waiter === w) { r.waiter = null; clearTimeout(w.timer); r.lastSeen = Date.now(); } });
+      res.on('close', () => { if (r.waiter === w) { r.waiter = null; clearTimeout(w.timer); } });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/info') {
@@ -719,17 +800,20 @@ async function handler(req, res) {
         if (r && r.owner === body.sid) {
           r.owner = null;
           r.lastSeen = 0;
+          r.running.clear();
           if (r.waiter) { clearTimeout(r.waiter.timer); json(r.waiter.res, 200, []); r.waiter = null; }
           if (r.online) { r.online = false; log(`Studio (${body.role || 'edit'}) desconectou: ${r.place}`); }
         }
         return json(res, 200, { ok: true });
       }
       case '/result': {
+        for (const r of roles.values()) r.running.delete(String(body.id));
         const p = pending.get(String(body.id));
         if (p) { pending.delete(String(body.id)); clearTimeout(p.timer); p.resolve(body.result || { ok: false, error: 'sem resultado' }); }
         return json(res, 200, { ok: true });
       }
       case '/sync': {
+        if (undecided.has(body.file)) return json(res, 200, { ok: true }); // esperando a escolha no painel
         if (body.type === 'write' && typeof body.source === 'string') {
           if (known.get(body.file) !== body.source) { writeLocal(body.file, body.source); log(`Studio → disco: ${body.file}`); }
         } else if (body.type === 'delete') {
@@ -739,6 +823,8 @@ async function handler(req, res) {
       }
       case '/snapshot':
         return json(res, 200, applySnapshot(Array.isArray(body.scripts) ? body.scripts : []));
+      case '/resolve':
+        return json(res, 200, resolveChoice(body.choice === 'studio' ? 'studio' : 'disco', Array.isArray(body.files) ? body.files : []));
       case '/log':
         for (const e of body.entries || []) addLog(body.role || 'edit', e.kind, e.msg);
         return json(res, 200, { ok: true });

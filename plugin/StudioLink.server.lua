@@ -8,7 +8,7 @@
 	Instalação: copie este arquivo para %LOCALAPPDATA%\Roblox\Plugins
 ]]
 
-local VERSION = "1.5.0"
+local VERSION = "1.5.2"
 local DEFAULT_PORT = 34880
 
 local HttpService = game:GetService("HttpService")
@@ -42,20 +42,30 @@ do
 		c = { port = DEFAULT_PORT, enabled = true } -- migração da versão antiga (botão global)
 		plugin:SetSetting("StudioLinkMigrated", true)
 	end
+	-- A porta mora no próprio place (atributo no Workspace; o playtest copia o place). Os settings do plugin são
+	-- compartilhados entre Studios abertos: um regrava a tabela do outro, e o "Last" mandava o teste pro servidor errado.
+	if workspace:GetAttribute("StudioLinkPort") then
+		c = { port = workspace:GetAttribute("StudioLinkPort"), enabled = true }
+	end
 	if not c and ROLE ~= "edit" then c = plugin:GetSetting("StudioLinkLast") end -- playtest de place não publicado
 	c = type(c) == "table" and c or {}
 	port = tonumber(c.port) or DEFAULT_PORT
 	enabled = c.enabled == true
 end
+local function markPort()
+	if ROLE == "edit" then workspace:SetAttribute("StudioLinkPort", enabled and port or nil) end
+end
+markPort()
 local function savePlace()
 	local all = loadPlaces()
 	all[PLACE_KEY] = { port = port, enabled = enabled }
 	plugin:SetSetting("StudioLinkPlaces", all)
 	plugin:SetSetting("StudioLinkLast", { port = port, enabled = enabled })
+	markPort()
 end
 
 -- estado pro painel
-local state = { conflict = nil, info = nil, lastCmd = nil, lastCmdAt = 0, lastError = nil }
+local state = { conflict = nil, info = nil, lastCmd = nil, lastCmdAt = 0, lastError = nil, pending = nil }
 
 local function say(msg)
 	print("[StudioLink] " .. msg)
@@ -1206,10 +1216,30 @@ local function sendSnapshot()
 	end
 	local res, err = request("POST", "/snapshot", { scripts = scripts })
 	if res then
-		say(("sincronizado: %d scripts"):format(#scripts))
-		return { ok = true, scripts = #scripts }
+		local ask = type(res) == "table" and type(res.perguntar) == "table" and #res.perguntar > 0 and res.perguntar or nil
+		state.pending = ask -- o painel abre e pergunta
+		say(("sincronizado: %d scripts"):format(#scripts) .. (ask and (" | %d diferentes entre Studio e disco: escolha no painel"):format(#ask) or ""))
+		return { ok = true, scripts = #scripts, esperandoEscolha = ask and #ask or nil }
 	end
 	return { ok = false, error = "snapshot falhou: " .. tostring(err) }
+end
+
+-- choice: "disco" ou "studio". Manda a versão atual do Studio (pode ter mudado enquanto o painel esperava).
+local function resolvePending(choice)
+	local list = state.pending
+	if not list then return end
+	state.pending = nil
+	local files = {}
+	for _, it in ipairs(list) do
+		local s = owner[it.file]
+		table.insert(files, { file = it.file, source = s and editorSource(s) or nil })
+	end
+	local res, err = request("POST", "/resolve", { choice = choice, files = files })
+	if res then
+		say(("%d scripts: %s"):format(#files, choice == "studio" and "mantida a versão do Studio" or "usada a versão do disco") .. " (a outra está em .bridge/backup)")
+	else
+		say("não consegui mandar a escolha (" .. tostring(err) .. "); vai perguntar de novo ao reconectar")
+	end
 end
 
 local function findScript(parent, leaf)
@@ -1340,23 +1370,38 @@ end
 
 ------------------------------------------------------------------ Output → servidor
 local logBuf = {}
+local clientBuf = {} -- no server: o que o client mandou, esperando o server conectar no bridge
+-- no Play o plugin carrega depois dos scripts do jogo: o que saiu antes (ex.: erro na largada) só está no histórico.
+-- Lido e conectado sem yield no meio, então nada entra duas vezes; o atributo evita reenviar se o plugin recarregar.
+if ROLE ~= "edit" and not LogService:GetAttribute("StudioLinkSeeded") then
+	pcall(LogService.SetAttribute, LogService, "StudioLinkSeeded", true)
+	for _, e in ipairs(LogService:GetLogHistory()) do
+		if #logBuf >= 500 then break end
+		table.insert(logBuf, { kind = e.messageType.Name, msg = e.message })
+	end
+end
 LogService.MessageOut:Connect(function(msg, mtype)
 	if #logBuf < 500 then table.insert(logBuf, { kind = mtype.Name, msg = msg }) end
 end)
 task.spawn(function()
 	while alive do
 		task.wait(0.5)
-		if #logBuf > 0 then
-			if ROLE == "client" then
-				if relayLog then
-					local batch = logBuf
-					logBuf = {}
-					pcall(relayLog.FireServer, relayLog, batch)
-				end
-			elseif connected then
+		if ROLE == "client" then
+			if relayLog and #logBuf > 0 then
+				local batch = logBuf
+				logBuf = {}
+				pcall(relayLog.FireServer, relayLog, batch)
+			end
+		elseif connected then
+			if #logBuf > 0 then
 				local batch = logBuf
 				logBuf = {}
 				request("POST", "/log", { role = ROLE, entries = batch })
+			end
+			if #clientBuf > 0 then
+				local batch = clientBuf
+				clientBuf = {}
+				request("POST", "/log", { role = "client", entries = batch })
 			end
 		end
 	end
@@ -1366,7 +1411,8 @@ end)
 local function handle(cmd)
 	if cmd.relay == "client" then
 		if ROLE ~= "server" or not relayFn then return { ok = false, error = "relay pro client indisponível" } end
-		local plr = game:GetService("Players"):GetPlayers()[1]
+		local players = game:GetService("Players")
+		local plr = (cmd.player and players:FindFirstChild(cmd.player)) or players:GetPlayers()[1]
 		if not plr then return { ok = false, error = "nenhum jogador no playtest ainda" } end
 		cmd.relay = nil
 		local ok, res = pcall(relayFn.InvokeClient, relayFn, plr, cmd)
@@ -1479,9 +1525,12 @@ if ROLE == "server" then
 	relayLog.Name = LOG_NAME
 	relayLog.Archivable = false
 	relayLog.Parent = rs
+	-- o 1º lote do client (com os erros da largada) costuma chegar antes do server conectar: guarda em vez de descartar
 	relayLog.OnServerEvent:Connect(function(_, batch)
-		if connected and type(batch) == "table" then
-			request("POST", "/log", { role = "client", entries = batch })
+		if type(batch) ~= "table" then return end
+		for _, e in ipairs(batch) do
+			if #clientBuf >= 500 then break end
+			table.insert(clientBuf, e)
 		end
 	end)
 elseif ROLE == "client" then
@@ -1673,6 +1722,45 @@ if ROLE == "edit" then
 	help.AutomaticSize = Enum.AutomaticSize.Y
 	help.Parent = root
 
+	-- Studio e disco diferentes na reconexão: quem escolhe é a pessoa, aqui no Studio (com mais gente no place o código não adivinha)
+	local ask = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 0, Visible = false, Parent = root }, {
+		corner(8), pad(12), new("UIStroke", { Thickness = 2, Color = YELLOW }),
+		new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
+	theme(ask, "BackgroundColor3", SC.InputFieldBackground)
+	label({ text = "Studio e disco estão diferentes", bold = true, size = 14, order = 1 }).Parent = ask
+	local askList = label({ text = "", dim = true, size = 12, order = 2, sizeUDim = UDim2.new(1, 0, 0, 0) })
+	askList.TextWrapped = true
+	askList.TextTruncate = Enum.TextTruncate.None
+	askList.AutomaticSize = Enum.AutomaticSize.Y
+	askList.Parent = ask
+	local askBtns = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 34), LayoutOrder = 3, Parent = ask })
+	for i, opt in ipairs({ { "Usar o disco", "disco" }, { "Manter o Studio", "studio" } }) do
+		local b = new("TextButton", {
+			Size = UDim2.new(0.5, -4, 1, 0), Position = UDim2.new((i - 1) * 0.5, (i - 1) * 4, 0, 0), Font = Enum.Font.GothamBold,
+			TextSize = 13, AutoButtonColor = true, Text = opt[1], Parent = askBtns,
+		}, { corner(8) })
+		theme(b, "BackgroundColor3", SC.Button)
+		theme(b, "TextColor3", SC.ButtonText)
+		b.Activated:Connect(function()
+			ask.Visible = false
+			resolvePending(opt[2])
+		end)
+	end
+	local askShown, askOpened
+	local function renderAsk()
+		ask.Visible = state.pending ~= nil
+		if state.pending == askShown then return end
+		askShown = state.pending
+		if not askShown then return end
+		local lines = { "Esses scripts mudaram no Studio desde o último sync. Escolha qual versão fica; a outra vai pra .bridge/backup. Até escolher, eles não sincronizam.", "" }
+		for i, it in ipairs(askShown) do
+			if i > 12 then table.insert(lines, ("+ %d outros"):format(#askShown - 12)) break end
+			table.insert(lines, "• " .. it.file .. (it.velho and "  (Studio com versão antiga)" or ""))
+		end
+		askList.Text = table.concat(lines, "\n")
+	end
+
 	local function ago(t)
 		local d = math.floor(os.clock() - t)
 		if d < 60 then return d .. "s atrás" end
@@ -1691,6 +1779,7 @@ if ROLE == "edit" then
 		else
 			color, t, d = GREEN, "Conectado", "localhost:" .. port
 		end
+		renderAsk()
 		dot.BackgroundColor3 = color
 		halo.Color = color
 		stTitle.Text = t
@@ -1733,6 +1822,7 @@ if ROLE == "edit" then
 				local data = request("GET", "/info")
 				if type(data) == "table" then state.info = data end
 			end
+			if state.pending and state.pending ~= askOpened then askOpened = state.pending; widget.Enabled = true end -- abre o painel pra perguntar
 			if widget.Enabled then pcall(render) end
 			n += 1
 			task.wait(1)

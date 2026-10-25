@@ -49,6 +49,7 @@ const HELP = `StudioLink — comandos de projeto (rode na pasta do jogo)
   restart                        reinicia o servidor (studiolink start sobe de novo)
 
   --target edit|server|client    onde executar (padrão: edit). server/client só durante teste
+  --player <Nome>                com --target client: em qual jogador (Server & Clients)
   --timeout <segundos>           padrão 60`;
 
 function parse(argv) {
@@ -96,7 +97,7 @@ const fmt = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 async function main() {
   const { pos, flags } = parse(process.argv.slice(2));
   const sub = pos.shift();
-  const timeout = Number(flags.timeout) || ({ selftest: 180, fuzz: (Number(pos[0]) || 40) + 150, blender: 330, upload: 240, image: 240, icon: 240, texture: 240 }[sub] || 60);
+  const timeout = Number(flags.timeout) || ({ selftest: 180, play: 120, fuzz: (Number(pos[0]) || 40) + 150, blender: 330, upload: 240, image: 240, icon: 240, texture: 240 }[sub] || 60);
   const target = flags.target || 'edit';
   let cmd;
 
@@ -182,6 +183,7 @@ async function main() {
     default: console.log(HELP); process.exit(sub && sub !== 'help' ? 1 : 0);
   }
 
+  if (typeof flags.player === 'string') cmd.player = flags.player; // playtest com vários clientes: qual jogador
   const exportTo = cmd.exportTo;
   delete cmd.exportTo;
   const r = await post({ target, timeout, cmd }, timeout);
