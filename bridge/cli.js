@@ -3,14 +3,12 @@
 // CLI que o Claude Code usa pra falar com o Studio através do server.js
 
 const fs = require('fs');
-const http = require('http');
 const path = require('path');
 
-const { loadProject } = require('./project');
-const PROJECT = loadProject();
-const PORT = PROJECT.port;
+const { loadProject, timeoutFor, post } = require('./project');
+const PORT = loadProject().port;
 
-const HELP = `StudioLink — comandos de projeto (rode na pasta do jogo)
+const HELP = `StudioLink: comandos de projeto (rode na pasta do jogo)
 
   status                         quem está conectado (edit / server / client)
 
@@ -52,16 +50,21 @@ const HELP = `StudioLink — comandos de projeto (rode na pasta do jogo)
   --player <Nome>                com --target client: em qual jogador (Server & Clients)
   --timeout <segundos>           padrão 60`;
 
+const BOOL = new Set(['replace', 'insert', 'upload', 'clear', 'force']);
+const TARGETS = ['edit', 'server', 'client'];
+
 function parse(argv) {
   const pos = [];
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a.startsWith('--')) {
-      const k = a.slice(2);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) { flags[k] = next; i++; } else flags[k] = true;
-    } else pos.push(a);
+    // o código do eval pode começar com "--" (comentário Luau)
+    if (!a.startsWith('--') || (pos.length === 1 && pos[0] === 'eval')) { pos.push(a); continue; }
+    const eq = a.indexOf('=');
+    if (eq > 2) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
+    const k = a.slice(2);
+    const next = argv[i + 1];
+    if (!BOOL.has(k) && next !== undefined && !next.startsWith('--')) { flags[k] = next; i++; } else flags[k] = true;
   }
   return { pos, flags };
 }
@@ -73,33 +76,16 @@ function jsonArg(v, what) {
   try { return JSON.parse(v); } catch (e) { throw new Error(`${what}: JSON inválido (${e.message})`); }
 }
 
-function post(body, timeoutSec) {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body);
-    const req = http.request({
-      host: '127.0.0.1', port: PORT, path: '/cmd', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), 'X-Bridge': '1' },
-      timeout: (timeoutSec + 10) * 1000,
-    }, (res) => {
-      let raw = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => (raw += c));
-      res.on('end', () => { try { resolve(JSON.parse(raw)); } catch { reject(new Error('resposta inválida: ' + raw)); } });
-    });
-    req.on('timeout', () => req.destroy(new Error('timeout falando com o server.js')));
-    req.on('error', (e) => reject(e.code === 'ECONNREFUSED' ? new Error(`servidor do projeto não está rodando na porta ${PORT}: rode "studiolink start" na pasta do jogo`) : e));
-    req.end(data);
-  });
-}
-
 const fmt = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 
 async function main() {
   const { pos, flags } = parse(process.argv.slice(2));
   const sub = pos.shift();
-  const timeout = Number(flags.timeout) || ({ selftest: 180, play: 120, fuzz: (Number(pos[0]) || 40) + 150, blender: 330, upload: 240, image: 240, icon: 240, texture: 240 }[sub] || 60);
-  const target = flags.target || 'edit';
+  const str = (k) => (typeof flags[k] === 'string' ? flags[k] : undefined);
+  const target = str('target') || 'edit';
+  if (!TARGETS.includes(target)) throw new Error('--target: use edit, server ou client');
   let cmd;
+  let exportTo;
 
   switch (sub) {
     case 'status': cmd = { type: 'status' }; break;
@@ -111,8 +97,12 @@ async function main() {
       break;
     }
     case 'eval': cmd = { type: 'run', code: pos.join(' '), name: 'eval' }; break;
-    case 'tree': cmd = { type: 'tree', path: pos[0] || 'Workspace', depth: Number(pos[1]) || 2 }; break;
-    case 'logs': cmd = { type: 'logs', n: Number(pos[0]) || 100, role: flags.role, clear: !!flags.clear }; break;
+    case 'tree': {
+      const depth = Number(pos[1] ?? 2);
+      cmd = { type: 'tree', path: pos[0] || 'Workspace', depth: Number.isNaN(depth) ? 2 : depth };
+      break;
+    }
+    case 'logs': cmd = { type: 'logs', n: Number(pos[0]) || 100, role: str('role'), clear: !!flags.clear }; break;
     case 'play': {
       if (!['run', 'test', 'stop'].includes(pos[0])) throw new Error('uso: play run|test|stop');
       cmd = { type: 'play', action: pos[0] };
@@ -123,70 +113,68 @@ async function main() {
       if (!a) throw new Error('uso: create <Classe> [--name N] [--props json] | create <json|arquivo.json>');
       let spec;
       if (/^[A-Za-z][A-Za-z0-9]*$/.test(a) && !fs.existsSync(a)) {
-        spec = { class: a };
-        if (typeof flags.name === 'string') spec.name = flags.name;
+        spec = { class: a, name: str('name') };
         const props = jsonArg(flags.props, '--props');
         if (props) spec.props = props;
       } else {
         spec = jsonArg(a, 'objeto');
       }
-      cmd = { type: 'create', spec, parent: typeof flags.parent === 'string' ? flags.parent : undefined, replace: !!flags.replace };
+      cmd = { type: 'create', spec, parent: str('parent'), replace: !!flags.replace };
       break;
     }
     case 'set': {
       if (!pos[0] || !pos[1]) throw new Error("uso: set <caminho> '{\"Prop\": valor}'");
       const body = jsonArg(pos[1], 'propriedades');
-      // aceita {props:{...}, attributes, tags} ou direto {Prop: valor}
-      cmd = body.props || body.attributes || body.tags || body.pivot || body.move ? { type: 'set', path: pos[0], ...body } : { type: 'set', path: pos[0], props: body };
+      // aceita {props, attributes, tags, pivot, move} ou direto {Prop: valor}
+      cmd = body.props || body.attributes || body.tags || body.pivot || body.move ? { ...body, type: 'set', path: pos[0] } : { type: 'set', path: pos[0], props: body };
       break;
     }
     case 'get': cmd = { type: 'get', path: pos[0], depth: Number(flags.depth) || 0 }; break;
     case 'export': {
       if (!pos[0] || !pos[1]) throw new Error('uso: export <caminho> arquivo.json [--depth N]');
-      cmd = { type: 'get', path: pos[0], depth: flags.depth !== undefined ? Number(flags.depth) : 50, exportTo: pos[1] };
+      cmd = { type: 'get', path: pos[0], depth: flags.depth !== undefined ? Number(flags.depth) : 50 };
+      exportTo = pos[1];
       break;
     }
     case 'delete': if (!pos.length) throw new Error('uso: delete <caminho> [caminho...]'); cmd = { type: 'delete', path: pos.length === 1 ? pos[0] : pos }; break;
     case 'clone': {
       if (!pos[0]) throw new Error('uso: clone <caminho> [--parent P] [--name N] [--props json]');
-      cmd = { type: 'clone', path: pos[0], parent: typeof flags.parent === 'string' ? flags.parent : undefined, name: typeof flags.name === 'string' ? flags.name : undefined, props: jsonArg(flags.props, '--props') };
+      cmd = { type: 'clone', path: pos[0], parent: str('parent'), name: str('name'), props: jsonArg(flags.props, '--props') };
       break;
     }
     case 'fuzz': cmd = { type: 'fuzz', seconds: Number(pos[0]) || 40, seed: flags.seed ? Number(flags.seed) : undefined }; break;
     case 'blender': {
       if (!pos[0]) throw new Error('uso: blender <script.py | -> [--open arquivo.blend]');
       cmd = pos[0] === '-' ? { type: 'blender', code: fs.readFileSync(0, 'utf8') } : { type: 'blender', script: pos[0] };
-      if (typeof flags.open === 'string') cmd.open = flags.open;
+      cmd.open = str('open');
       break;
     }
-    case 'upload': cmd = { type: 'upload', file: pos[0], name: typeof flags.name === 'string' ? flags.name : undefined, insert: !!flags.insert, parent: typeof flags.parent === 'string' ? flags.parent : undefined }; break;
-    case 'image': cmd = { type: 'image', file: pos[0], name: typeof flags.name === 'string' ? flags.name : undefined, force: !!flags.force }; break;
-    case 'icons': cmd = { type: 'icons', query: pos.join(' '), limit: Number(flags.limit) || 20, style: typeof flags.style === 'string' ? flags.style : undefined }; break;
+    case 'upload': cmd = { type: 'upload', file: pos[0], name: str('name'), insert: !!flags.insert, parent: str('parent') }; break;
+    case 'image': cmd = { type: 'image', file: pos[0], name: str('name'), force: !!flags.force }; break;
+    case 'icons': cmd = { type: 'icons', query: pos.join(' '), limit: Number(flags.limit) || 20, style: str('style') }; break;
     case 'icon': {
       if (!pos[0]) throw new Error('uso: icon <id> [--color #hex] [--outline #hex|none] [--thick N] [--shadow N] [--size N] [--name N] [--upload]');
-      cmd = { type: 'icon', id: pos[0], upload: !!flags.upload };
-      for (const k of ['color', 'outline', 'name']) if (typeof flags[k] === 'string') cmd[k] = flags[k];
+      cmd = { type: 'icon', id: pos[0], upload: !!flags.upload, color: str('color'), outline: str('outline'), name: str('name') };
       for (const k of ['thick', 'shadow', 'size']) if (flags[k] !== undefined) cmd[k] = Number(flags[k]);
       break;
     }
     case 'texture': {
-      cmd = { type: 'texture', kind: pos[0] || 'studs', upload: !!flags.upload };
-      for (const k of ['color', 'name']) if (typeof flags[k] === 'string') cmd[k] = flags[k];
+      cmd = { type: 'texture', kind: pos[0] || 'studs', upload: !!flags.upload, color: str('color'), name: str('name') };
       if (flags.size !== undefined) cmd.size = Number(flags.size);
       break;
     }
-    case 'insert': cmd = { type: 'insert', assetId: pos[0], parent: typeof flags.parent === 'string' ? flags.parent : undefined, name: typeof flags.name === 'string' ? flags.name : undefined }; break;
+    case 'insert': cmd = { type: 'insert', assetId: pos[0], parent: str('parent'), name: str('name') }; break;
     case 'resync': cmd = { type: 'snapshot' }; break;
     case 'pushall': cmd = { type: 'pushall' }; break;
     case 'restart': cmd = { type: 'restart' }; break;
     case 'selftest': cmd = { type: 'selftest' }; break;
-    default: console.log(HELP); process.exit(sub && sub !== 'help' ? 1 : 0);
+    default: console.log(HELP); process.exit(!sub || ['help', '-h'].includes(sub) ? 0 : 1);
   }
 
-  if (typeof flags.player === 'string') cmd.player = flags.player; // playtest com vários clientes: qual jogador
-  const exportTo = cmd.exportTo;
-  delete cmd.exportTo;
-  const r = await post({ target, timeout, cmd }, timeout);
+  if (str('player')) cmd.player = str('player'); // playtest com vários clientes: qual jogador
+  if (str('timeout')) cmd.timeout = Number(flags.timeout);
+  const timeout = timeoutFor(cmd);
+  const r = await post(PORT, { target, timeout, cmd }, timeout);
   if (exportTo && r.ok && r.object) {
     fs.writeFileSync(exportTo, JSON.stringify(r.object, null, 2));
     console.log(`salvo em ${exportTo}`);
@@ -206,10 +194,11 @@ async function main() {
   if (r.results) for (const t of r.results) console.log(`${t.ok ? '✓' : '✗'} ${t.teste}${t.info ? '  → ' + (typeof t.info === 'string' ? t.info : JSON.stringify(t.info)) : ''}`);
   if (r.returns && r.returns.length) console.log('→ ' + r.returns.map(fmt).join(', '));
   const rest = { ...r };
-  for (const k of ['ok', 'output', 'logs', 'text', 'returns', 'error', 'ms', 'last', 'results']) delete rest[k];
+  for (const k of ['ok', 'output', 'logs', 'text', 'returns', 'error', 'ms', 'results', 'report']) delete rest[k];
   if (Object.keys(rest).length) console.log(fmt(rest));
   if (r.ms !== undefined) console.log(`(${r.ms} ms)`);
   if (!r.ok) { console.error('ERRO: ' + (r.error || 'falhou')); process.exit(1); }
+  if (sub === 'status' && !/^online/.test((r.studio && r.studio.edit) || '')) process.exit(3); // código 3: Studio (edit) não conectado
 }
 
 main().catch((e) => { console.error('ERRO: ' + e.message); process.exit(1); });

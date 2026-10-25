@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// studiolink — comando global do StudioLink.
-//   studiolink init | start | plugin | mcp | version   (coisas da instalação/projeto)
-//   qualquer outro comando vai pro CLI do projeto (status, create, run, play, fuzz...)
+// Comando global: init/start/plugin/key/library/mcp/version aqui; o resto vai pro CLI do projeto (bridge/cli.js).
 
 const fs = require('fs');
 const net = require('net');
@@ -14,7 +12,7 @@ const { findRoot, loadProject, VERSION } = require('../bridge/project');
 const PKG = path.join(__dirname, '..');
 const sub = process.argv[2];
 
-const HELP = `StudioLink ${VERSION} — liga o Claude Code ao Roblox Studio
+const HELP = `StudioLink ${VERSION}: liga o Claude Code ao Roblox Studio
 
   INSTALAÇÃO E PROJETO
   init [nome] [--port N]         prepara a pasta atual como projeto (studiolink.json, src/, CLAUDE.md)
@@ -35,7 +33,8 @@ function installPlugin() {
   const dir = pluginsDir();
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, 'StudioLink.server.lua');
-  fs.copyFileSync(path.join(PKG, 'plugin', 'StudioLink.server.lua'), dest);
+  const src = fs.readFileSync(path.join(PKG, 'plugin', 'StudioLink.server.lua'), 'utf8');
+  fs.writeFileSync(dest, src.replace(/^local VERSION = ".*"$/m, `local VERSION = "${VERSION}"`));
   console.log(`plugin ${VERSION} instalado em ${dest}`);
   console.log('O Studio recarrega sozinho (se não, feche e abra o place).');
 }
@@ -84,7 +83,7 @@ async function init(args) {
     port = 34880;
     while (used.has(port) || !(await portFree(port))) port++;
   }
-  fs.writeFileSync(cfgFile, JSON.stringify({ port, name }, null, 2) + '\n');
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...cfg, port, name }, null, 2) + '\n');
 
   const made = ['studiolink.json'];
   for (const d of ['src/ServerScriptService', 'src/ReplicatedStorage', 'src/StarterPlayer/StarterPlayerScripts', 'tools/build']) {
@@ -102,7 +101,8 @@ async function init(args) {
   console.log(`no painel StudioLink, ponha a porta ${port} e clique em Conectar.`);
 }
 
-// mantém o servidor de pé: se cair (ou pedir restart), sobe de novo
+// Mantém o servidor de pé: se cair (ou pedir restart), sobe de novo. Se morre logo ao subir duas vezes
+// seguidas (porta em uso, erro de sintaxe), desiste em vez de ficar em loop.
 function start() {
   const root = findRoot();
   if (!root) {
@@ -113,10 +113,17 @@ function start() {
   if (process.platform === 'win32') process.stdout.write(`\x1b]0;${name} (StudioLink :${port})\x07`);
   let child = null;
   let stopping = false;
+  let quickFails = 0;
   const run = () => {
+    const t0 = Date.now();
     child = spawn(process.execPath, [path.join(PKG, 'bridge', 'server.js')], { cwd: root, stdio: 'inherit' });
     child.on('exit', (code) => {
       if (stopping) return process.exit(0);
+      quickFails = code && Date.now() - t0 < 5000 ? quickFails + 1 : 0;
+      if (quickFails >= 2) {
+        console.error(`[StudioLink] o servidor caiu logo ao subir duas vezes (código ${code}). Veja o erro acima.`);
+        return process.exit(code);
+      }
       console.log(`[StudioLink] servidor parou (código ${code}), subindo de novo em 2s...`);
       setTimeout(run, 2000);
     });
@@ -128,13 +135,9 @@ function start() {
 }
 
 // chave da Open Cloud no .env da pasta do StudioLink (fora do git)
-function ensureEnv() {
+async function saveKey(arg) {
   const env = path.join(PKG, '.env');
   if (!fs.existsSync(env)) fs.copyFileSync(path.join(PKG, '.env.example'), env);
-  return env;
-}
-async function saveKey(arg) {
-  const env = ensureEnv();
   let key = arg;
   if (!key) {
     const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
@@ -152,7 +155,6 @@ async function saveKey(arg) {
   switch (sub) {
     case 'key': return saveKey(process.argv[3]);
     case 'library': return require('../bridge/assets').download();
-    case 'env': return console.log(ensureEnv());
     case 'init': return init(process.argv.slice(3));
     case 'start': return start();
     case 'plugin': return installPlugin();
@@ -161,8 +163,7 @@ async function saveKey(arg) {
       return console.log(VERSION);
     case undefined: case 'help': case '--help': case '-h':
       console.log(HELP);
-      process.argv = process.argv.slice(0, 2).concat('help');
-      return require('../bridge/cli.js');
+      return require('../bridge/cli.js'); // imprime a ajuda dos comandos de projeto
     default:
       return require('../bridge/cli.js'); // status, create, set, get, run, play, fuzz, blender, upload...
   }

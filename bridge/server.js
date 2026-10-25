@@ -1,28 +1,28 @@
 #!/usr/bin/env node
 'use strict';
-// StudioLink — servidor local entre o Claude Code (bridge/cli.js) e o plugin do Roblox Studio.
-// Rode na pasta do projeto:  studiolink start
-// Os scripts do jogo ficam sincronizados (nos dois sentidos) em ./src
+// Servidor de um projeto: fila de comandos pro plugin (long-poll) e sync de src/ com o Studio.
+// Roda na pasta do projeto (studiolink start).
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
-const { findRoot, VERSION } = require('./project');
-const ROOT = path.resolve(process.env.BRIDGE_ROOT || findRoot() || process.cwd());
-// Porta: variável BRIDGE_PORT > studiolink.json { "port": 34881 } > 34880. Um servidor por projeto.
-let CONFIG = {};
-try { CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, 'studiolink.json'), 'utf8')); } catch {}
-const PORT = Number(process.env.BRIDGE_PORT) || Number(CONFIG.port) || 34880;
-const PROJECT = CONFIG.name || path.basename(ROOT);
+const { loadProject, VERSION } = require('./project');
+const { createSync, winner } = require('./sync');
+const Assets = require('./assets');
+
+const { root, config: CONFIG, port: PORT, name: PROJECT } = loadProject();
+const ROOT = root || process.cwd();
 const SRC = path.join(ROOT, 'src');
-const BACKUP = path.join(ROOT, '.bridge', 'backup');
 const POLL_HOLD_MS = 8000; // o HttpService do Studio corta requisições longas (~15s)
 const ONLINE_MS = 20000;
 const MAX_BODY = 64 * 1024 * 1024;
+const ROLES = ['edit', 'server', 'client'];
+const HOSTS = [`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-fs.mkdirSync(SRC, { recursive: true });
 fs.mkdirSync(path.join(ROOT, '.bridge'), { recursive: true });
 const LOGFILE = path.join(ROOT, '.bridge', 'server.log');
 try { if (fs.statSync(LOGFILE).size > 2e6) fs.renameSync(LOGFILE, LOGFILE + '.old'); } catch {}
@@ -64,10 +64,13 @@ function flush(name) {
     json(w.res, 200, r.queue.splice(0));
   }
 }
+// O prefixo muda a cada boot: um /result atrasado de antes de um restart não responde um comando novo.
+const BOOT = crypto.randomBytes(4).toString('hex');
 let nextId = 1;
+const newId = () => `${BOOT}-${nextId++}`;
 const pending = new Map();
 function enqueue(name, cmd) {
-  cmd.id = String(nextId++);
+  cmd.id = newId();
   getRole(name).queue.push(cmd);
   flush(name);
   return cmd.id;
@@ -75,7 +78,7 @@ function enqueue(name, cmd) {
 function call(name, cmd, timeoutMs = 60000) {
   return new Promise((resolve) => {
     cmd.reply = true;
-    cmd.id = String(nextId++);
+    cmd.id = newId();
     const r = getRole(name);
     const timer = setTimeout(() => {
       pending.delete(cmd.id);
@@ -96,204 +99,19 @@ function call(name, cmd, timeoutMs = 60000) {
 const logs = [];
 let logSeq = 0;
 function addLog(role, kind, msg) {
-  logs.push({ seq: ++logSeq, t: Date.now(), role, kind, msg });
+  logs.push({ seq: ++logSeq, t: Date.now(), role, kind, msg: String(msg).slice(0, 4000) });
   if (logs.length > 3000) logs.splice(0, logs.length - 3000);
 }
 
-// ---------------------------------------------------------------- sync de scripts
-const known = new Map(); // caminho relativo (a/b/c.server.luau) -> conteúdo sincronizado
-// caminho -> hashes das versões que já foram sincronizadas. Se o Studio volta com uma delas, ficou pra trás
-// (place reaberto da nuvem, escrita que o plugin nunca aplicou) e não pode sobrescrever o disco.
-const seen = new Map();
-const hash = (src) => crypto.createHash('sha1').update(src).digest('hex');
-function setKnown(rel, src) {
-  known.set(rel, src);
-  const list = seen.get(rel) || [];
-  const h = hash(src);
-  if (!list.includes(h)) { list.push(h); if (list.length > 200) list.shift(); seen.set(rel, list); }
-}
-const STATE = path.join(ROOT, '.bridge', 'state.json');
-try {
-  const saved = JSON.parse(fs.readFileSync(STATE, 'utf8'));
-  for (const [k, v] of Object.entries(saved.seen || {})) seen.set(k, v);
-  for (const [k, v] of Object.entries(saved.known || {})) setKnown(k, v);
-} catch {}
-let saveTimer = null;
-function saveState() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try { fs.writeFileSync(STATE, JSON.stringify({ known: Object.fromEntries(known), seen: Object.fromEntries(seen) })); } catch {}
-  }, 300);
-}
-
-function toAbs(rel) {
-  if (typeof rel !== 'string' || !rel || rel.includes('\\') || rel.split('/').some((p) => p === '..' || p === '.' || p === '')) {
-    throw new Error('caminho inválido: ' + rel);
-  }
-  return path.join(SRC, ...rel.split('/'));
-}
-function walk(dir, base = '') {
-  let out = [];
-  let entries = [];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
-  for (const e of entries) {
-    const rel = base ? base + '/' + e.name : e.name;
-    if (e.isDirectory()) out = out.concat(walk(path.join(dir, e.name), rel));
-    else if (e.name.endsWith('.luau')) out.push(rel);
-  }
-  return out;
-}
-function removeEmptyDirs(dir) {
-  let entries = [];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-  for (const e of entries) if (e.isDirectory()) removeEmptyDirs(path.join(dir, e.name));
-  if (dir !== SRC) { try { fs.rmdirSync(dir); } catch {} }
-}
-function backup(rel, tag, source) {
-  const dst = path.join(BACKUP, tag, ...rel.split('/'));
-  fs.mkdirSync(path.dirname(dst), { recursive: true });
-  if (source === undefined) fs.copyFileSync(toAbs(rel), dst);
-  else fs.writeFileSync(dst, source);
-}
-function writeLocal(rel, source) {
-  const abs = toAbs(rel);
-  setKnown(rel, source);
-  saveState();
-  try { if (fs.readFileSync(abs, 'utf8') === source) return; } catch {}
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, source);
-}
-function deleteLocal(rel) {
-  const abs = toAbs(rel);
-  known.delete(rel);
-  saveState();
-  try { fs.unlinkSync(abs); } catch {}
-  let dir = path.dirname(abs);
-  while (dir.startsWith(SRC) && dir !== SRC) {
-    try { fs.rmdirSync(dir); } catch { break; }
-    dir = path.dirname(dir);
-  }
-}
-
-// Ao conectar (ou reconectar), junta Studio e disco usando o último estado sincronizado (known):
-// Studio igual ao último sync → só o disco mudou, o disco vence sozinho.
-// Studio mudou (alguém editou no place, ou o place reabriu com versão velha) → o código não adivinha:
-// o painel do plugin pergunta e a versão que perde vai pra .bridge/backup. Até lá o arquivo não sincroniza.
-// Existe só de um lado → copia pro outro (nunca apaga na reconexão). Nada é perdido.
-function winner(s, d, k) {
-  if (s === d) return 'iguais';
-  if (s === k) return 'disco';
-  return 'perguntar';
-}
-let undecided = new Map(); // caminho -> versão do Studio, esperando a escolha no painel
-const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
-function resolveChoice(choice, files) {
-  const tag = stamp();
-  let n = 0;
-  for (const f of files) {
-    if (!undecided.has(f.file)) continue;
-    const s = typeof f.source === 'string' ? f.source : undecided.get(f.file);
-    undecided.delete(f.file);
-    const abs = toAbs(f.file);
-    if (choice === 'studio') {
-      if (fs.existsSync(abs)) backup(f.file, tag);
-      writeLocal(f.file, s);
-    } else {
-      let d;
-      try { d = fs.readFileSync(abs, 'utf8'); } catch { continue; }
-      backup(f.file, tag + '/studio', s);
-      setKnown(f.file, d);
-      enqueue('edit', { type: 'write', file: f.file, source: d });
-    }
-    n++;
-  }
-  saveState();
-  log(`escolha no Studio: ${choice === 'studio' ? 'manter o Studio' : 'usar o disco'} em ${n} scripts | a outra versão ficou em .bridge/backup/${tag}`);
-  return { ok: true, resolvidos: n };
-}
-function applySnapshot(scripts) {
-  const tag = stamp();
-  undecided = new Map();
-  const perguntar = [];
-  const S = new Map();
-  for (const s of scripts) { toAbs(s.file); S.set(s.file, s.source); }
-  const D = new Map();
-  for (const rel of walk(SRC)) D.set(rel, fs.readFileSync(toAbs(rel), 'utf8'));
-  const files = new Set([...S.keys(), ...D.keys()]);
-  const toStudio = [];
-  const st = { iguais: 0, studioParaDisco: 0, discoParaStudio: 0, perguntar: 0 };
-  for (const rel of files) {
-    const s = S.get(rel), d = D.get(rel), k = known.get(rel);
-    if (s !== undefined && d !== undefined) {
-      const w = winner(s, d, k);
-      if (w === 'iguais') { setKnown(rel, s); st.iguais++; }
-      else if (w === 'disco') { setKnown(rel, d); toStudio.push({ type: 'write', file: rel, source: d }); st.discoParaStudio++; }
-      else {
-        undecided.set(rel, s);
-        // dica pro painel: o Studio tem uma versão que já foi sincronizada antes, então provavelmente ficou pra trás
-        perguntar.push({ file: rel, velho: (seen.get(rel) || []).includes(hash(s)) });
-        st.perguntar++;
-      }
-    } else if (s !== undefined) {
-      // só no Studio: vai pro disco. Na reconexão nunca se apaga nada (o Studio pode ser outra versão do place);
-      // apagar só sincroniza ao vivo, com os dois lados conectados.
-      writeLocal(rel, s); st.studioParaDisco++;
-    } else {
-      // só no disco: vai pro Studio
-      setKnown(rel, d); toStudio.push({ type: 'write', file: rel, source: d }); st.discoParaStudio++;
-    }
-  }
-  for (const rel of [...known.keys()]) if (!files.has(rel)) known.delete(rel);
-  for (const rel of [...seen.keys()]) if (!files.has(rel)) seen.delete(rel);
-  removeEmptyDirs(SRC);
-  saveState();
-  for (const c of toStudio) enqueue('edit', c);
-  log(`snapshot: ${S.size} no Studio, ${D.size} no disco | ` + Object.entries(st).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join(' ') + (st.perguntar ? ' | esperando escolha no painel do Studio' : ''));
-  return { ok: true, scripts: S.size, ...st, perguntar };
-}
-
-function syncToStudio(cmd) {
-  if (!isOnline('edit')) {
-    log(`Studio offline: ${cmd.file} ficou só no disco (rode "cli.js pushall" depois)`);
-    return;
-  }
-  enqueue('edit', cmd);
-  log(`disco → Studio: ${cmd.type} ${cmd.file}`);
-}
-function onDiskChange(rel) {
-  let abs, stat = null;
-  try { abs = toAbs(rel); } catch { return; }
-  if (undecided.has(rel)) return; // esperando a escolha no painel; ela lê o disco na hora
-  try { stat = fs.statSync(abs); } catch {}
-  if (stat && stat.isDirectory()) { for (const f of walk(abs, rel)) onDiskChange(f); return; }
-  if (!rel.endsWith('.luau')) {
-    if (!stat) for (const k of [...known.keys()]) if (k.startsWith(rel + '/')) onDiskChange(k); // pasta apagada
-    return;
-  }
-  if (!stat) {
-    if (known.has(rel)) { known.delete(rel); saveState(); syncToStudio({ type: 'delete', file: rel }); }
-    return;
-  }
-  let src;
-  try { src = fs.readFileSync(abs, 'utf8'); } catch { return; }
-  if (known.get(rel) === src) return;
-  setKnown(rel, src);
-  saveState();
-  syncToStudio({ type: 'write', file: rel, source: src });
-}
-const debounce = new Map();
-fs.watch(SRC, { recursive: true }, (_ev, name) => {
-  if (!name) return;
-  const rel = String(name).split(path.sep).join('/');
-  clearTimeout(debounce.get(rel));
-  debounce.set(rel, setTimeout(() => { debounce.delete(rel); onDiskChange(rel); }, 150));
+const sync = createSync({
+  SRC, BACKUP: path.join(ROOT, '.bridge', 'backup'), STATE: path.join(ROOT, '.bridge', 'state.json'), log, enqueue, isOnline,
 });
 
 // ---------------------------------------------------------------- comandos do CLI
 async function handleCmd(body) {
   const cmd = body.cmd || {};
   const target = body.target || 'edit';
-  const timeout = Math.max(1, Number(body.timeout) || 60) * 1000;
+  const timeout = Math.min(Math.max(1, Number(body.timeout) || 60), 86400) * 1000;
   switch (cmd.type) {
     case 'status': {
       const out = {};
@@ -302,31 +120,13 @@ async function handleCmd(body) {
         out[name] = isOnline(name) ? `online (${r.place || '?'})` + (b ? `, rodando ${b}` : '') : b ? `sem resposta, travado em ${b}?` : 'offline';
       }
       if (isOnline('server') && !isOnline('client')) out.client = 'via server';
-      return { ok: true, projeto: PROJECT, porta: PORT, studio: out, src: SRC, scripts: known.size,
-        esperandoEscolha: undecided.size ? `${undecided.size} scripts diferentes entre Studio e disco: a pessoa escolhe no painel do StudioLink (não sincronizam até lá)` : undefined };
+      return { ok: true, projeto: PROJECT, porta: PORT, studio: out, src: SRC, scripts: sync.known.size,
+        esperandoEscolha: sync.undecided.size ? `${sync.undecided.size} scripts diferentes entre Studio e disco: a pessoa escolhe no painel do StudioLink (não sincronizam até lá)` : undefined };
     }
     case 'logs': {
-      let list = logs;
-      if (cmd.role) list = list.filter((l) => l.role === cmd.role);
-      if (cmd.since) list = list.filter((l) => l.seq > cmd.since);
-      list = list.slice(-(cmd.n || 100));
-      const last = logSeq;
+      const list = (cmd.role ? logs.filter((l) => l.role === cmd.role) : logs).slice(-(cmd.n || 100));
       if (cmd.clear) logs.length = 0;
-      return { ok: true, logs: list, last };
-    }
-    case 'open-project': {
-      // sobe o servidor de outro projeto (pasta com studiolink.json) numa janela própria
-      const root = path.resolve(String(cmd.root || ''));
-      if (!fs.existsSync(path.join(root, 'studiolink.json'))) return { ok: false, error: 'sem studiolink.json em ' + root + ' (rode studiolink init lá)' };
-      const { spawn } = require('child_process');
-      const title = path.basename(root).replace(/"/g, '');
-      const bin = path.join(__dirname, '..', 'bin', 'studiolink.js');
-      const child = spawn('cmd.exe', ['/c', `start "${title} (StudioLink)" /D "${root}" "${process.execPath}" "${bin}" start`], {
-        detached: true, stdio: 'ignore', windowsVerbatimArguments: true,
-      });
-      child.unref();
-      log(`abriu o servidor do projeto ${root}`);
-      return { ok: true, root };
+      return { ok: true, logs: list };
     }
     case 'selftest':
       return selftest();
@@ -351,18 +151,12 @@ async function handleCmd(body) {
       setTimeout(tryExit, 1500); // espera o que já está rodando (ex.: Blender) terminar
       return { ok: true, restarting: true };
     }
-    case 'pushall': {
+    case 'pushall':
       if (!isOnline('edit')) return { ok: false, error: 'Studio (edit) offline' };
-      const files = walk(SRC);
-      for (const rel of files) {
-        const src = fs.readFileSync(toAbs(rel), 'utf8');
-        setKnown(rel, src);
-        enqueue('edit', { type: 'write', file: rel, source: src });
-      }
-      return { ok: true, pushed: files.length };
-    }
+      return { ok: true, pushed: sync.pushAll() };
     case 'play':
       if (cmd.action === 'stop' && isOnline('server')) return call('server', { type: 'play', action: 'endtest' }, timeout);
+      if ((cmd.action === 'test' || cmd.action === 'run') && isOnline('server')) return { ok: false, error: 'já tem um teste rodando' };
       if ((cmd.action === 'test' || cmd.action === 'run') && isOnline('edit')) {
         const r = await call('edit', cmd, timeout);
         // com vários Studios abertos o server do playtest pode levar mais de 1 min pra subir: só responde quando ele chega
@@ -374,7 +168,7 @@ async function handleCmd(body) {
     default: {
       // logo depois de um restart/recarregar plugin/iniciar playtest o papel pode demorar uns segundos pra voltar
       for (let i = 0; i < 30 && !isOnline(target) && !busy(target) && !(target === 'client' && isOnline('server')); i++) {
-        await new Promise((r) => setTimeout(r, 500));
+        await sleep(500);
       }
       if (target === 'client' && !isOnline('client') && isOnline('server')) {
         return call('server', { ...cmd, relay: 'client' }, timeout); // client não faz HTTP: vai pelo server
@@ -390,16 +184,14 @@ async function handleCmd(body) {
   }
 }
 
-
 // ---------------------------------------------------------------- autoteste
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function selftest() {
   const results = [];
   const check = (name, ok, info) => { results.push({ teste: name, ok: !!ok, info: ok ? undefined : info }); log(`selftest: ${ok ? 'OK ' : 'FALHOU'} ${name}`); };
   const run = (code, target = 'edit', timeout = 30) => handleCmd({ target, timeout, cmd: { type: 'run', name: 'selftest', code } });
   const waitFor = async (fn, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await sleep(300); } return false; };
   const REL = 'ServerStorage/__StudioLinkSelfTest.luau';
-  const ABS = toAbs(REL);
+  const ABS = sync.toAbs(REL);
   try {
     check('reconexão: Studio mudado nunca sobrescreve o disco sozinho (pergunta no painel)',
       winner('v1', 'v2', 'v1') === 'disco' && winner('v1', 'v2', 'v2') === 'perguntar' && winner('v3', 'v2', 'v1') === 'perguntar');
@@ -413,7 +205,6 @@ async function selftest() {
     r = await run('local t = nil\nreturn t.x');
     check('erro de execução tem a linha certa', !r.ok && /:2:/.test(r.error || ''), r);
 
-    // disco -> Studio
     fs.mkdirSync(path.dirname(ABS), { recursive: true });
     fs.writeFileSync(ABS, 'return "disco ✓"\n');
     const viaDisk = await waitFor(async () => {
@@ -422,18 +213,15 @@ async function selftest() {
     });
     check('sync disco → Studio (com acento)', viaDisk);
 
-    // Studio -> disco
     await run('game.ServerStorage.__StudioLinkSelfTest.Source = "return \\"studio\\"\\n"');
     const viaStudio = await waitFor(async () => { try { return fs.readFileSync(ABS, 'utf8') === 'return "studio"\n'; } catch { return false; } });
     check('sync Studio → disco', viaStudio);
 
-    // apagar no Studio -> some do disco
     await run('game.ServerStorage.__StudioLinkSelfTest:Destroy()');
     const gone = await waitFor(async () => !fs.existsSync(ABS));
     check('apagar no Studio apaga o arquivo', gone);
     try { fs.unlinkSync(ABS); } catch {}
 
-    // playtest
     r = await handleCmd({ cmd: { type: 'play', action: 'test' } });
     check('iniciar Play', r.ok, r);
     if (r.ok) {
@@ -464,11 +252,7 @@ async function selftest() {
   return { ok, results };
 }
 
-
-
 // ---------------------------------------------------------------- Blender e assets (rodam neste PC)
-const { spawn: spawnProc } = require('child_process');
-
 // chaves: .env da pasta do StudioLink (vale pra todos os projetos, fora do git) < .env do projeto < variáveis do sistema
 const GLOBAL_ENV = path.join(__dirname, '..', '.env');
 function loadEnv() {
@@ -515,12 +299,12 @@ function runBlender(cmd) {
     const lib = path.join(__dirname, 'blender');
     const boot = `import sys, os; sys.path.insert(0, r"${lib}"); os.chdir(r"${ROOT}")`;
     const args = ['-b', '--factory-startup', '--python-exit-code', '1', '--python-expr', boot];
-    if (cmd.open) args.splice(1, 0, path.resolve(ROOT, cmd.open)); // abrir um .blend existente
-    args.push('--python', file, '--', ...(cmd.args || []));
-    const timeoutMs = Math.max(10, Number(cmd.timeout) || 300) * 1000;
+    if (cmd.open) args.splice(1, 0, path.resolve(ROOT, cmd.open)); // o .blend vem logo depois do -b
+    args.push('--python', file);
+    const timeoutMs = Math.min(Math.max(10, Number(cmd.timeout) || 300), 86400) * 1000;
     const t0 = Date.now();
     log(`blender: ${path.basename(file)}`);
-    const child = spawnProc(exe, args, { cwd: ROOT, windowsHide: true });
+    const child = spawn(exe, args, { cwd: ROOT, windowsHide: true });
     let out = '';
     const keep = (d) => { out += d.toString(); if (out.length > 400000) out = out.slice(-200000); };
     child.stdout.on('data', keep);
@@ -528,6 +312,7 @@ function runBlender(cmd) {
     const timer = setTimeout(() => child.kill(), timeoutMs);
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (cmd.code) try { fs.unlinkSync(file); } catch {}
       const reports = [];
       for (const line of out.split(/\r?\n/)) {
         if (line.startsWith('RBX_REPORT ')) { try { reports.push(...JSON.parse(line.slice(11))); } catch {} }
@@ -550,9 +335,9 @@ const ASSET_TYPES = {
 async function uploadAsset(cmd) {
   const env = loadEnv();
   const key = env.ROBLOX_API_KEY;
-  const userId = env.ROBLOX_USER_ID || CONFIG.creatorUserId;
-  const groupId = env.ROBLOX_GROUP_ID || CONFIG.creatorGroupId;
-  if (!key) return { ok: false, error: 'falta ROBLOX_API_KEY em ' + GLOBAL_ENV + ' (Open Cloud, permissão Assets read+write)' };
+  const userId = env.ROBLOX_USER_ID;
+  const groupId = env.ROBLOX_GROUP_ID;
+  if (!key) return { ok: false, error: 'falta a chave da Open Cloud: rode "studiolink key" (permissão Assets read+write)' };
   if (!userId && !groupId) return { ok: false, error: 'falta ROBLOX_USER_ID (ou ROBLOX_GROUP_ID) em ' + GLOBAL_ENV };
   const file = path.resolve(ROOT, String(cmd.file || ''));
   if (!fs.existsSync(file)) return { ok: false, error: 'arquivo não existe: ' + file };
@@ -561,7 +346,7 @@ async function uploadAsset(cmd) {
   if (!kind) return { ok: false, error: 'tipo não suportado: ' + ext + ' (use fbx/gltf/glb/obj, png/jpg, mp3/ogg/wav)' };
   const name = String(cmd.name || path.basename(file, ext)).slice(0, 50);
   const request = {
-    assetType: cmd.assetType || kind[0], displayName: name, description: String(cmd.description || 'StudioLink').slice(0, 1000),
+    assetType: kind[0], displayName: name, description: 'StudioLink',
     creationContext: { creator: groupId ? { groupId: String(groupId) } : { userId: String(userId) } },
   };
   const form = new FormData();
@@ -580,15 +365,15 @@ async function uploadAsset(cmd) {
     await sleep(2000);
     try {
       const r = await fetch('https://apis.roblox.com/assets/v1/' + op.path, { headers: { 'x-api-key': key } });
-      op = await r.json();
+      if (r.ok) op = await r.json();
     } catch {}
   }
   if (!op.done) return { ok: false, error: 'o Roblox não terminou de processar em 2 min (operação ' + op.path + ')' };
   if (op.error) return { ok: false, error: 'Roblox recusou: ' + JSON.stringify(op.error).slice(0, 400) };
   const assetId = op.response && op.response.assetId;
   const out = { ok: true, assetId, tipo: request.assetType, nome: name };
-  if (cmd.insert) {
-    const ins = await handleCmd({ timeout: 60, cmd: { type: 'insert', assetId, parent: cmd.parent, name: cmd.insertName || name, pivot: cmd.pivot } });
+  if (cmd.insert ?? kind[0] === 'Model') {
+    const ins = await handleCmd({ timeout: 60, cmd: { type: 'insert', assetId, parent: cmd.parent, name } });
     out.insert = ins;
     if (!ins.ok) out.aviso = 'upload ok, mas inserir falhou (asset novo pode levar alguns segundos/minutos na moderação): ' + ins.error;
   }
@@ -596,16 +381,13 @@ async function uploadAsset(cmd) {
 }
 
 // ---------------------------------------------------------------- imagens (ícones, texturas, referências)
-const Assets = require('./assets');
-
-// sobe uma imagem e devolve o rbxassetid que vai em ImageLabel.Image / Texture.Texture (com cache por conteúdo)
+// Sobe uma imagem e devolve o rbxassetid de ImageLabel.Image / Texture.Texture. Cache pelo conteúdo.
 async function uploadImage(cmd) {
   let file = path.resolve(ROOT, String(cmd.file || ''));
   if (!fs.existsSync(file)) return { ok: false, error: 'arquivo não existe: ' + file };
-  if (/\.svg$/i.test(file)) { // Roblox não aceita SVG: converte pra PNG 512 do lado
+  if (/\.svg$/i.test(file)) { // o Roblox não aceita SVG
     try {
-      const { Resvg } = require('@resvg/resvg-js');
-      const png = new Resvg(fs.readFileSync(file, 'utf8'), { fitTo: { mode: 'width', value: Number(cmd.size) || 512 } }).render().asPng();
+      const png = Assets.render(fs.readFileSync(file, 'utf8'), 512);
       file = file.replace(/\.svg$/i, '.png');
       fs.writeFileSync(file, png);
     } catch (e) { return { ok: false, error: 'não consegui converter o SVG: ' + e.message }; }
@@ -613,7 +395,7 @@ async function uploadImage(cmd) {
   const hash = crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex');
   const cached = Assets.uploadedGet(hash);
   if (cached && cached.imageUri && !cmd.force) return { ok: true, ...cached, cache: true };
-  const up = await uploadAsset({ file, name: cmd.name, description: cmd.description });
+  const up = await uploadAsset({ file, name: cmd.name });
   if (!up.ok) return up;
   // o Open Cloud devolve o id do Decal; a imagem de verdade sai lendo o Decal no Studio
   let info = null, lastErr = '';
@@ -630,40 +412,31 @@ async function uploadImage(cmd) {
   return { ok: true, ...out };
 }
 
-function saveProjectImage(sub, name, png) {
+// Salva o PNG em assets/<sub> do projeto e, com upload, sobe e devolve o imageUri.
+async function saveImage(sub, name, png, cmd, extra) {
   const dir = path.join(ROOT, 'assets', sub);
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, name.replace(/[^\w.-]+/g, '_') + '.png');
-  fs.writeFileSync(file, png);
-  return path.relative(ROOT, file);
+  const abs = path.join(dir, name.replace(/[^\w.-]+/g, '_') + '.png');
+  fs.writeFileSync(abs, png);
+  const out = { ok: true, arquivo: path.relative(ROOT, abs), ...extra };
+  if (!cmd.upload) return out;
+  const up = await uploadImage({ file: abs, name });
+  if (!up.ok) return { ...out, ok: false, error: up.error };
+  return { ...out, imageUri: up.imageUri, decalId: up.decalId, cache: up.cache };
 }
 
 async function makeIcon(cmd) {
   let r;
   try { r = Assets.icon(String(cmd.id || ''), cmd); } catch (e) { return { ok: false, error: e.message }; }
   const name = cmd.name || r.it.id.split('/').pop() + (cmd.color ? '_' + String(cmd.color).replace('#', '') : '');
-  const file = saveProjectImage('icons', name, r.png);
-  const out = { ok: true, arquivo: file, fonte: r.it.id, licenca: r.license };
-  if (cmd.upload) {
-    const up = await uploadImage({ file, name });
-    if (!up.ok) return { ...out, ok: false, error: up.error };
-    Object.assign(out, { imageUri: up.imageUri, decalId: up.decalId, cache: up.cache });
-  }
-  return out;
+  return saveImage('icons', name, r.png, cmd, { fonte: r.it.id, licenca: r.license });
 }
 
 async function makeTexture(cmd) {
   let png;
   try { png = Assets.texture(String(cmd.kind || 'studs'), cmd); } catch (e) { return { ok: false, error: e.message }; }
   const name = cmd.name || String(cmd.kind || 'studs') + (cmd.color ? '_' + String(cmd.color).replace('#', '') : '');
-  const file = saveProjectImage('textures', name, png);
-  const out = { ok: true, arquivo: file, dica: 'use num Texture com StudsPerTileU/V = 1 (studs) ou o tamanho do tile em studs' };
-  if (cmd.upload) {
-    const up = await uploadImage({ file, name });
-    if (!up.ok) return { ...out, ok: false, error: up.error };
-    Object.assign(out, { imageUri: up.imageUri, decalId: up.decalId, cache: up.cache });
-  }
-  return out;
+  return saveImage('textures', name, png, cmd, { dica: 'use num Texture com StudsPerTileU/V = 1 (studs) ou o tamanho do tile em studs' });
 }
 
 // ---------------------------------------------------------------- teste bruteforce
@@ -671,69 +444,71 @@ async function fuzz(cmd) {
   const seconds = Math.min(300, Math.max(5, Number(cmd.seconds) || 40));
   const seq0 = logSeq; // antes do Play: pega também erros de quando os scripts iniciam
   let weStarted = false;
-  if (!isOnline('server')) {
-    const r = await handleCmd({ cmd: { type: 'play', action: 'test' } });
-    if (!r.ok) return { ok: false, error: 'não consegui iniciar o playtest: ' + r.error };
-    weStarted = true;
-  }
-  const t0 = Date.now();
-  while (!isOnline('server') && Date.now() - t0 < 40000) await sleep(500);
-  if (!isOnline('server')) return { ok: false, error: 'o server do playtest não conectou em 40s' };
-  let players = 0;
-  for (let i = 0; i < 40 && players < 1; i++) {
-    const r = await handleCmd({ target: 'server', timeout: 10, cmd: { type: 'run', name: 'fuzz_wait', code: 'return #game:GetService("Players"):GetPlayers()' } });
-    players = r.ok ? r.returns[0] : 0;
-    if (players < 1) await sleep(500);
-  }
-  if (players < 1) return { ok: false, error: 'nenhum jogador entrou no playtest' };
-  await sleep(3000); // deixa a UI e os scripts do client subirem
-
-  log(`fuzz: jogando ${seconds}s`);
-  const uiAntes = await handleCmd({ target: 'client', timeout: 30, cmd: { type: 'audit_ui' } });
-  const jogo = await handleCmd({ target: 'client', timeout: seconds + 40, cmd: { type: 'fuzz_input', seconds, seed: cmd.seed } });
-  const uiDepois = await handleCmd({ target: 'client', timeout: 30, cmd: { type: 'audit_ui' } });
-  const mundo = await handleCmd({ target: 'server', timeout: 30, cmd: { type: 'audit_world' } });
-  await sleep(1000);
-
-  // erros e avisos do Output (server e client), agrupados
-  const group = (kind) => {
-    const map = new Map();
-    for (const l of logs) {
-      if (l.seq <= seq0 || l.kind !== kind || /^\[StudioLink\]/.test(l.msg)) continue;
-      const k = l.role + '|' + l.msg;
-      if (map.has(k)) map.get(k).vezes++;
-      else map.set(k, { onde: l.role, mensagem: l.msg.slice(0, 500), vezes: 1 });
+  try {
+    if (!isOnline('server')) {
+      const r = await handleCmd({ cmd: { type: 'play', action: 'test' } });
+      if (!r.ok) return { ok: false, error: 'não consegui iniciar o playtest: ' + r.error };
+      weStarted = true;
     }
-    return [...map.values()];
-  };
-  const erros = group('MessageError');
-  const avisos = group('MessageWarning');
-
-  const uiProblemas = [];
-  const seen = new Set();
-  for (const [quando, r] of [['início', uiAntes], ['depois de jogar', uiDepois]]) {
-    for (const p of (r.ok && r.problemas) || []) {
-      const k = p.tipo + '|' + p.onde;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      uiProblemas.push({ ...p, quando });
+    const t0 = Date.now();
+    while (!isOnline('server') && Date.now() - t0 < 40000) await sleep(500);
+    if (!isOnline('server')) return { ok: false, error: 'o server do playtest não conectou em 40s' };
+    let players = 0;
+    for (let i = 0; i < 40 && players < 1; i++) {
+      const r = await handleCmd({ target: 'server', timeout: 10, cmd: { type: 'run', name: 'fuzz_wait', code: 'return #game:GetService("Players"):GetPlayers()' } });
+      players = r.ok ? r.returns[0] : 0;
+      if (players < 1) await sleep(500);
     }
-  }
-  if (weStarted && !cmd.keepRunning) await handleCmd({ cmd: { type: 'play', action: 'stop' } });
+    if (players < 1) return { ok: false, error: 'nenhum jogador entrou no playtest' };
+    await sleep(3000); // deixa a UI e os scripts do client subirem
 
-  const falhas = [uiAntes, jogo, uiDepois, mundo].filter((r) => !r.ok).map((r) => r.error);
-  const resumo = {
-    erros: erros.length, avisos: avisos.length, ui: uiProblemas.length,
-    mundo: (mundo.ok && mundo.problemas.length) || 0, jogo: (jogo.ok && jogo.eventos.length) || 0,
-  };
-  log(`fuzz: ${JSON.stringify(resumo)}`);
-  return {
-    ok: true, resumo, segundos: seconds,
-    erros, avisos, ui: uiProblemas, mundo: mundo.ok ? mundo.problemas : [],
-    jogo: jogo.ok ? { acoes: jogo.acoes, cliquesReais: jogo.cliquesReais, botoesVisiveis: jogo.botoesVisiveis, nota: jogo.nota, eventos: jogo.eventos } : null,
-    tela: uiAntes.ok ? uiAntes.tela : null,
-    falhasDoTeste: falhas.length ? falhas : undefined,
-  };
+    log(`fuzz: jogando ${seconds}s`);
+    const uiAntes = await handleCmd({ target: 'client', timeout: 30, cmd: { type: 'audit_ui' } });
+    const jogo = await handleCmd({ target: 'client', timeout: seconds + 40, cmd: { type: 'fuzz_input', seconds, seed: cmd.seed } });
+    const uiDepois = await handleCmd({ target: 'client', timeout: 30, cmd: { type: 'audit_ui' } });
+    const mundo = await handleCmd({ target: 'server', timeout: 30, cmd: { type: 'audit_world' } });
+    await sleep(1000);
+
+    const group = (kind) => {
+      const map = new Map();
+      for (const l of logs) {
+        if (l.seq <= seq0 || l.kind !== kind || /^\[StudioLink\]/.test(l.msg)) continue;
+        const k = l.role + '|' + l.msg;
+        if (map.has(k)) map.get(k).vezes++;
+        else map.set(k, { onde: l.role, mensagem: l.msg.slice(0, 500), vezes: 1 });
+      }
+      return [...map.values()];
+    };
+    const erros = group('MessageError');
+    const avisos = group('MessageWarning');
+
+    const uiProblemas = [];
+    const shown = new Set();
+    for (const [quando, r] of [['início', uiAntes], ['depois de jogar', uiDepois]]) {
+      for (const p of (r.ok && r.problemas) || []) {
+        const k = p.tipo + '|' + p.onde;
+        if (shown.has(k)) continue;
+        shown.add(k);
+        uiProblemas.push({ ...p, quando });
+      }
+    }
+
+    const falhas = [uiAntes, jogo, uiDepois, mundo].filter((r) => !r.ok).map((r) => r.error);
+    const resumo = {
+      erros: erros.length, avisos: avisos.length, ui: uiProblemas.length,
+      mundo: (mundo.ok && mundo.problemas.length) || 0, jogo: (jogo.ok && jogo.eventos.length) || 0,
+    };
+    log(`fuzz: ${JSON.stringify(resumo)}`);
+    return {
+      ok: true, resumo, segundos: seconds,
+      erros, avisos, ui: uiProblemas, mundo: mundo.ok ? mundo.problemas : [],
+      jogo: jogo.ok ? { acoes: jogo.acoes, cliquesReais: jogo.cliquesReais, botoesVisiveis: jogo.botoesVisiveis, nota: jogo.nota, eventos: jogo.eventos } : null,
+      tela: uiAntes.ok ? uiAntes.tela : null,
+      falhasDoTeste: falhas.length ? falhas : undefined,
+    };
+  } finally {
+    if (weStarted && !cmd.keepRunning) await handleCmd({ cmd: { type: 'play', action: 'stop' } });
+  }
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -751,8 +526,10 @@ function readBody(req) {
 }
 
 async function handler(req, res) {
-  // Bloqueia navegadores (CSRF): só aceita quem manda o header X-Bridge e nenhum Origin.
-  if (req.headers.origin || req.headers['x-bridge'] !== '1') return json(res, 403, { error: 'forbidden' });
+  // Só o plugin e o CLI: navegador manda Origin e não manda X-Bridge; o Host barra DNS rebinding.
+  if (req.headers.origin || req.headers['x-bridge'] !== '1' || !HOSTS.includes(String(req.headers.host).toLowerCase())) {
+    return json(res, 403, { error: 'forbidden' });
+  }
   const url = new URL(req.url, 'http://localhost');
   try {
     if (req.method === 'GET' && url.pathname === '/poll') {
@@ -765,7 +542,7 @@ async function handler(req, res) {
         if (r.rejected !== sid) { r.rejected = sid; log(`recusou ${place} [${sid}] no papel ${name}: ${r.place} [${r.owner}] já está ligado`); }
         return json(res, 409, { conflict: true, place: r.place });
       }
-      if (r.owner !== sid) { r.flips = 0; r.running.clear(); } // plugin novo: o que rodava no antigo morreu
+      if (r.owner !== sid) r.running.clear(); // plugin novo: o que rodava no antigo morreu
       r.owner = sid;
       r.lastSeen = Date.now();
       if (!r.online) { r.online = true; log(`Studio (${name}) conectado: ${place} [${sid}]`); }
@@ -787,7 +564,7 @@ async function handler(req, res) {
     }
     if (req.method === 'GET' && url.pathname === '/info') {
       return json(res, 200, {
-        name: PROJECT, root: ROOT, port: PORT, version: VERSION, scripts: known.size,
+        name: PROJECT, root: ROOT, port: PORT, version: VERSION, scripts: sync.known.size,
         playtest: isOnline('server'),
         roles: Object.fromEntries([...roles].map(([n, r]) => [n, { online: isOnline(n), place: r.place || null }])),
       });
@@ -812,22 +589,18 @@ async function handler(req, res) {
         if (p) { pending.delete(String(body.id)); clearTimeout(p.timer); p.resolve(body.result || { ok: false, error: 'sem resultado' }); }
         return json(res, 200, { ok: true });
       }
-      case '/sync': {
-        if (undecided.has(body.file)) return json(res, 200, { ok: true }); // esperando a escolha no painel
-        if (body.type === 'write' && typeof body.source === 'string') {
-          if (known.get(body.file) !== body.source) { writeLocal(body.file, body.source); log(`Studio → disco: ${body.file}`); }
-        } else if (body.type === 'delete') {
-          if (known.has(body.file) || fs.existsSync(toAbs(body.file))) { deleteLocal(body.file); log(`Studio → disco: apagou ${body.file}`); }
-        }
+      case '/sync':
+        sync.fromStudio(body);
+        return json(res, 200, { ok: true });
+      case '/snapshot':
+        return json(res, 200, sync.applySnapshot(Array.isArray(body.scripts) ? body.scripts : []));
+      case '/resolve':
+        return json(res, 200, sync.resolveChoice(body.choice === 'studio' ? 'studio' : 'disco', Array.isArray(body.files) ? body.files : []));
+      case '/log': {
+        const role = body.role || 'edit';
+        if (ROLES.includes(role) && Array.isArray(body.entries)) for (const e of body.entries) addLog(role, e.kind, e.msg);
         return json(res, 200, { ok: true });
       }
-      case '/snapshot':
-        return json(res, 200, applySnapshot(Array.isArray(body.scripts) ? body.scripts : []));
-      case '/resolve':
-        return json(res, 200, resolveChoice(body.choice === 'studio' ? 'studio' : 'disco', Array.isArray(body.files) ? body.files : []));
-      case '/log':
-        for (const e of body.entries || []) addLog(body.role || 'edit', e.kind, e.msg);
-        return json(res, 200, { ok: true });
       case '/cmd':
         return json(res, 200, await handleCmd(body));
       default:
@@ -846,30 +619,36 @@ const OUTBOX = path.join(ROOT, '.bridge', 'outbox');
 fs.mkdirSync(INBOX, { recursive: true });
 fs.mkdirSync(OUTBOX, { recursive: true });
 const inboxBusy = new Set();
+async function runInbox(f) {
+  const abs = path.join(INBOX, f);
+  let body;
+  try { body = JSON.parse(fs.readFileSync(abs, 'utf8')); } catch {
+    let young = false;
+    try { young = Date.now() - fs.statSync(abs).mtimeMs < 2000; } catch {}
+    if (young) return; // pode estar no meio da gravação: tenta de novo na próxima volta
+  }
+  let result;
+  try {
+    if (!body) throw new Error('JSON inválido');
+    if (body.cmd && body.cmd.type === 'run' && body.cmd.file && !body.cmd.code) {
+      body.cmd.code = fs.readFileSync(path.resolve(ROOT, body.cmd.file), 'utf8');
+      body.cmd.name = path.basename(body.cmd.file);
+    }
+    log(`inbox: ${f} (${body.cmd && body.cmd.type})`);
+    result = await handleCmd(body);
+  } catch (e) {
+    result = { ok: false, error: 'inbox: ' + e.message };
+  }
+  try { fs.writeFileSync(path.join(OUTBOX, f), JSON.stringify(result, null, 2)); } catch {}
+  try { fs.unlinkSync(abs); } catch {}
+}
 setInterval(() => {
   let files = [];
   try { files = fs.readdirSync(INBOX).filter((f) => f.endsWith('.json')); } catch { return; }
   for (const f of files) {
     if (inboxBusy.has(f)) continue;
     inboxBusy.add(f);
-    const abs = path.join(INBOX, f);
-    (async () => {
-      let result;
-      try {
-        const body = JSON.parse(fs.readFileSync(abs, 'utf8'));
-        if (body.cmd && body.cmd.type === 'run' && body.cmd.file && !body.cmd.code) {
-          body.cmd.code = fs.readFileSync(path.resolve(ROOT, body.cmd.file), 'utf8');
-          body.cmd.name = path.basename(body.cmd.file);
-        }
-        log(`inbox: ${f} (${body.cmd && body.cmd.type})`);
-        result = await handleCmd(body);
-      } catch (e) {
-        result = { ok: false, error: 'inbox: ' + e.message };
-      }
-      try { fs.writeFileSync(path.join(OUTBOX, f), JSON.stringify(result, null, 2)); } catch {}
-      try { fs.unlinkSync(abs); } catch {}
-      inboxBusy.delete(f);
-    })();
+    runInbox(f).finally(() => inboxBusy.delete(f));
   }
 }, 500);
 
@@ -878,6 +657,7 @@ setInterval(() => {
   for (const [name, r] of roles) if (r.online && !isOnline(name)) { r.online = false; log(`Studio (${name}) desconectado`); }
 }, 5000);
 
+sync.start();
 const main = http.createServer(handler);
 main.on('error', (e) => {
   console.error(e.code === 'EADDRINUSE' ? `Porta ${PORT} já em uso (outra ponte rodando?)` : e);
@@ -886,5 +666,7 @@ main.on('error', (e) => {
 main.listen(PORT, '127.0.0.1', () => log(`StudioLink ${VERSION} | projeto "${PROJECT}" | http://localhost:${PORT} | sincronizando ${SRC}`));
 // "localhost" às vezes resolve pra IPv6 no Windows; escuta no ::1 também (só local).
 const v6 = http.createServer(handler);
-v6.on('error', () => {});
+v6.on('error', (e) => {
+  if (e.code !== 'EADDRNOTAVAIL' && e.code !== 'EAFNOSUPPORT') log(`não consegui escutar em [::1]:${PORT}: ${e.message}`);
+});
 v6.listen(PORT, '::1');

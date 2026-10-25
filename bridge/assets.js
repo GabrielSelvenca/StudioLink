@@ -1,10 +1,5 @@
 'use strict';
-// Biblioteca local de ícones + gerador de texturas (roda no PC, sem internet depois de baixar).
-//   Fontes: Fluent Emoji (Microsoft, MIT, coloridos) e game-icons.net (CC BY 3.0, silhuetas pra colorir).
-//   studiolink library            baixa/atualiza a biblioteca em <StudioLink>/library
-//   studiolink icons <busca>      procura ícones
-//   studiolink icon <id> [...]    gera PNG (cor, contorno, sombra) e opcionalmente sobe pro Roblox
-//   studiolink texture <tipo>     gera textura repetível (studs, grid, dots, stripes, checker)
+// Ícones locais (Fluent Emoji MIT, game-icons CC BY 3.0) e texturas geradas, renderizados com resvg.
 
 const fs = require('fs');
 const path = require('path');
@@ -18,11 +13,11 @@ const SOURCES = {
   fluent: {
     repo: 'https://github.com/microsoft/fluentui-emoji.git', dir: 'fluentui-emoji',
     sparse: ['/assets/*/metadata.json', '/assets/*/Color/*.svg', '/LICENSE'],
-    license: 'MIT (Microsoft Fluent Emoji) — sem crédito obrigatório',
+    license: 'MIT (Microsoft Fluent Emoji), sem crédito obrigatório',
   },
   gi: {
     repo: 'https://github.com/game-icons/icons.git', dir: 'game-icons',
-    license: 'CC BY 3.0 (game-icons.net) — ponha o crédito "Ícones: game-icons.net" na descrição do jogo',
+    license: 'CC BY 3.0 (game-icons.net): ponha o crédito "Ícones: game-icons.net" na descrição do jogo',
   },
 };
 
@@ -141,10 +136,9 @@ function iconSvg(it, o = {}) {
     // game-icons: 1º path é o fundo preto; o resto é o desenho (branco). Recolore.
     raw = raw.replace(/<path d="M0 0h512v512H0z"\s*\/>/, '');
     const fill = o.color || '#ffffff';
-    const grad = o.gradient !== false;
-    const defs = grad ? `<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${lighten(fill, 0.25)}"/><stop offset="1" stop-color="${fill}"/></linearGradient></defs>` : '';
+    const defs = `<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${lighten(fill, 0.25)}"/><stop offset="1" stop-color="${fill}"/></linearGradient></defs>`;
     const body = raw.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '').replace(/fill="[^"]*"/g, '');
-    inner = `<svg x="${pad}" y="${pad}" width="${size - 2 * pad}" height="${size - 2 * pad}" viewBox="0 0 512 512">${defs}<g fill="${grad ? 'url(#g)' : fill}">${body}</g></svg>`;
+    inner = `<svg x="${pad}" y="${pad}" width="${size - 2 * pad}" height="${size - 2 * pad}" viewBox="0 0 512 512">${defs}<g fill="url(#g)">${body}</g></svg>`;
   } else {
     const vb = attr(raw, 'viewBox') || '0 0 32 32';
     const body = raw.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
@@ -211,7 +205,8 @@ function uploadedSet(hash, val) {
   try { all = JSON.parse(fs.readFileSync(UPLOADED, 'utf8')); } catch {}
   all[hash] = val;
   fs.mkdirSync(LIB, { recursive: true });
-  fs.writeFileSync(UPLOADED, JSON.stringify(all, null, 1));
+  fs.writeFileSync(UPLOADED + '.tmp', JSON.stringify(all, null, 1));
+  fs.renameSync(UPLOADED + '.tmp', UPLOADED);
 }
 
-module.exports = { download, buildIndex, search, icon, iconSvg, texture, textureSvg, uploadedGet, uploadedSet, SOURCES, LIB };
+module.exports = { download, search, icon, texture, render, uploadedGet, uploadedSet };

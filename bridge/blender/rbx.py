@@ -1,30 +1,22 @@
 """
-rbx.py — funções prontas pra modelar no Blender e exportar pro Roblox (StudioLink).
+rbx: funções pra modelar no Blender e exportar pro Roblox (o blender_run do StudioLink roda com ela no path).
 
-Uso (dentro de um script rodado pela ferramenta blender_run). Jeito certo = MALHA ÚNICA + conferir o preview:
+1 unidade = 1 stud, Z pra cima, frente = -Y (vira a frente do Roblox); o X sai espelhado (Blender +X = Roblox -X).
+Monte o modelo com union() (uma malha só, sem peças sobrepostas por dentro), confira com check() e preview()
+e só então exporte. Limites do Roblox: 20.000 triângulos por mesh, textura até 1024x1024.
+Caminhos são relativos à pasta do projeto (assets/models, assets/textures, assets/blend).
+
     from rbx import *
     reset()
-    corpo = loft("Corpo", [(-5, 0.5, 0.5, 0), (-4, 1, 1, 0), (4, 1, 1, 0), (5, 0.4, 0.4, 0.3)])  # tubo contínuo
-    asa   = prism("Asa", [(-6, 1), (-6, 2), (6, 2), (6, 1)], -0.2, 0.2)                          # placa grossa
+    corpo = loft("Corpo", [(-5, 0.5, 0.5, 0), (-4, 1, 1, 0), (4, 1, 1, 0), (5, 0.4, 0.4, 0.3)])
+    asa = prism("Asa", [(-6, 1), (-6, 2), (6, 2), (6, 1)], -0.2, 0.2)
     material(corpo, "#f2f2f2"); material(asa, "#2f6fed")
-    obj = union([corpo, asa], "Modelo")       # funde tudo numa malha só (nada de peças sobrepostas)
-    shade_flat(obj)
-    print("CHECK", check(obj))                # tem que dar [] (fechada, 1 pedaço só)
-    palette_texture(obj, "assets/textures/modelo.png")   # cores chapadas, sem borrão
+    obj = union([corpo, asa], "Modelo")
+    print(check(obj))  # [] = fechada e num pedaço só
+    palette_texture(obj, "assets/textures/modelo.png")
     export_fbx("assets/models/modelo.fbx", [obj])
-    preview("assets/preview/modelo.png", [obj])          # 4 vistas: OLHE antes de entregar
+    preview("assets/preview/modelo.png", [obj])
     report([obj])
-
-Regras: nunca use join() pra montar o modelo final (gera peças sobrepostas); use union().
-Sempre olhe o preview (Read na imagem) e refaça até ficar bom. Só então faça upload.
-
-Convenções:
-- 1 unidade do Blender = 1 stud. Eixos do Blender: X = lado, Z = cima, FRENTE = -Y (vira a frente do Roblox, -Z).
-  Modele o nariz/frente apontando pra -Y. Se modelou pra +Y, gire 180° em Z antes de exportar.
-  O X sai espelhado: Blender +X = Roblox -X (pra mapas/plantas vistos de cima: use x = -leste).
-- Tamanhos/posições em studs; rotações em graus.
-- Arquivos: assets/models/*.fbx, assets/textures/*.png, assets/blend/*.blend (caminhos relativos à pasta do projeto).
-- Limites do Roblox: até 20.000 triângulos por mesh (mire em <= 10.000), textura até 1024x1024.
 """
 import bpy
 import bmesh
@@ -53,8 +45,7 @@ def _ensure_dir(path):
 
 def select_only(*objs):
     for o in list(bpy.context.view_layer.objects):
-        if o is not None:
-            o.select_set(False)
+        o.select_set(False)
     for o in objs:
         o.select_set(True)
     if objs:
@@ -74,7 +65,7 @@ def _place(obj, loc, rot):
 
 
 def apply_transforms(obj, location=False):
-    """Aplica rotação e escala (e posição se pedir). Sempre faça antes de exportar ou juntar."""
+    """Aplica rotação e escala (e posição se pedir). Sempre faça antes de exportar ou unir."""
     select_only(obj)
     bpy.ops.object.transform_apply(location=location, rotation=True, scale=True)
     return obj
@@ -178,18 +169,6 @@ def boolean(obj, cutter, op="DIFFERENCE"):
     return obj
 
 
-def join(objs, name):
-    """Junta vários objetos em um só (um MeshPart no Roblox)."""
-    for o in objs:
-        apply_transforms(o)
-    select_only(*objs)
-    bpy.ops.object.join()
-    obj = bpy.context.view_layer.objects.active
-    obj.name = name
-    obj.data.name = name
-    return obj
-
-
 # ------------------------------------------------------------------ topologia
 def tris(obj):
     obj.data.calc_loop_triangles()
@@ -272,6 +251,8 @@ def smart_uv(obj, margin=0.02):
 def _rgba(color):
     if isinstance(color, str):
         h = color.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
         r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
         # hex é sRGB; o Blender trabalha em linear
         lin = lambda c: c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
@@ -378,7 +359,7 @@ def bind(mesh, arm):
 def export_fbx(path, objs=None):
     """Exporta pro Roblox (FBX). objs: lista de objetos (padrão: todos os meshes e armatures)."""
     path = _ensure_dir(path)
-    objs = objs or [o for o in bpy.context.scene.objects if o.type in ("MESH", "ARMATURE")]
+    objs = list(objs or [o for o in bpy.context.scene.objects if o.type in ("MESH", "ARMATURE")])
     extra = []
     for o in objs:
         if o.type == "MESH":
@@ -429,7 +410,7 @@ def report(objs=None):
     return out
 
 
-# ------------------------------------------------------------------ malha única e limpa (use isto em vez de join)
+# ------------------------------------------------------------------ malha única
 def loft(name, sections, sides=8, cap_front=None, cap_back=None, angle_offset=None):
     """Tubo contínuo (fuselagem, garrafa, tronco...) a partir de seções ao longo de Y.
     sections: [(y, raio_x, raio_z, z_centro), ...] de trás pra frente ou de frente pra trás.
@@ -481,8 +462,8 @@ def prism(name, outline, z0, z1, axis="Z"):
 
 
 def union(objs, name):
-    """Funde vários objetos fechados numa malha ÚNICA (boolean exato): sem peças sobrepostas por dentro.
-    Os materiais de cada parte são mantidos."""
+    """Funde objetos fechados numa malha só (boolean exato), sem peças sobrepostas por dentro.
+    Cada parte mantém o material."""
     base = objs[0]
     for o in objs:
         apply_transforms(o)
@@ -616,6 +597,7 @@ def preview(path, objs=None, size=640):
     sun.data.energy = 2.2
     sun.rotation_euler = (math.radians(50), math.radians(-20), math.radians(30))
     s.render.resolution_x = s.render.resolution_y = size
+    s.render.resolution_percentage = 100
     cam = _link(bpy.data.objects.new("PreviewCam", bpy.data.cameras.new("PreviewCam")))
     cam.data.type = "ORTHO"
     cam.data.ortho_scale = radius * 1.75
@@ -625,17 +607,15 @@ def preview(path, objs=None, size=640):
     for i, (_, d) in enumerate(views):
         d = Vector(d).normalized()
         cam.location = center + d * radius * 4
-        up = "Y" if abs(d.z) < 0.99 else "Z"
-        cam.rotation_euler = (center - cam.location).to_track_quat("-Z", "Y" if up == "Y" else "Y").to_euler()
+        cam.rotation_euler = (center - cam.location).to_track_quat("-Z", "Y").to_euler()
         if abs(d.z) >= 0.99:
             cam.rotation_euler = (0, 0, 0)
-        f = path[:-4] + f"_{i}.png"
+        f = os.path.splitext(path)[0] + f"_{i}.png"
         s.render.filepath = f
         bpy.ops.render.render(write_still=True)
         files.append(f)
     bpy.data.objects.remove(cam, do_unlink=True)
     bpy.data.objects.remove(sun, do_unlink=True)
-    # junta as 4 imagens numa grade 2x2
     imgs = [bpy.data.images.load(f) for f in files]
     W = size * 2
     out = bpy.data.images.new(os.path.basename(path), W, W, alpha=False)

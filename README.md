@@ -4,7 +4,8 @@
 
 O Claude cria e edita o jogo direto no Studio: scripts sincronizados com arquivos `.luau` nos dois sentidos,
 objetos criados por JSON na hora (Parts, Models, UI, luzes, efeitos), playtest controlado pelo terminal,
-teste bruteforce (`fuzz`), modelos 3D pelo Blender e upload de assets pela Open Cloud. Sem dependências.
+teste bruteforce (`fuzz`), modelos 3D pelo Blender e upload de assets pela Open Cloud. Uma dependência só:
+o resvg, que desenha os PNGs de ícones e texturas.
 
 ## Instalar (uma vez por PC)
 1. Tenha o **Node.js 20+** e o **Roblox Studio**.
@@ -17,7 +18,7 @@ teste bruteforce (`fuzz`), modelos 3D pelo Blender e upload de assets pela Open 
 ```
 cd C:\dev\MeuJogo
 studiolink init          # cria studiolink.json (porta livre), src/, CLAUDE.md, start.cmd
-studiolink start         # liga o servidor do projeto (deixe aberto) — ou dois cliques no start.cmd
+studiolink start         # liga o servidor do projeto (deixe aberto) ou dois cliques no start.cmd
 ```
 No Studio, abra o place → aba **Plugins → StudioLink** → ponha a porta do `studiolink.json` → **Conectar**.
 Depois é só abrir o Claude Code na pasta do jogo.
@@ -65,14 +66,16 @@ Claude Code ──(MCP / studiolink)──► servidor do projeto (localhost:por
                                          src/  ⇄  scripts do jogo
 ```
 - Só aceita conexões locais e bloqueia requisições de navegador.
-- Ao reconectar nada é apagado; versões em conflito vão pra `.bridge/backup/`.
+- Ao reconectar nada é apagado. Se um script mudou no Studio, o painel do plugin pergunta qual versão fica;
+  a outra vai pra `.bridge/backup/`.
 - Upload de assets: crie uma User API Key em create.roblox.com → Open Cloud (permissão assets read + write) e rode
   `studiolink key` (salva no `.env` da pasta do StudioLink, fora do git, e vale pra todos os projetos).
 
 ## Estrutura
 ```
 bin/studiolink.js      comando global (init, start, plugin, mcp + CLI)
-bridge/server.js       servidor de cada projeto
+bridge/server.js       servidor de cada projeto (fila de comandos, HTTP)
+bridge/sync.js         sync de src/ com o Studio (teste: node bridge/sync.test.js)
 bridge/cli.js          comandos de terminal
 bridge/mcp.js          ferramentas MCP (studio_*, blender_run...)
 bridge/blender/rbx.py  biblioteca de modelagem pro Blender

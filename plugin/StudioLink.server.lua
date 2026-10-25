@@ -1,12 +1,5 @@
 --!nocheck
---[[
-	StudioLink — plugin do Roblox Studio
-	Liga o Studio ao server.js local (bridge/server.js) para o Claude Code:
-	  • executar qualquer Luau no Studio (edit, ou server/client durante playtest)
-	  • sincronizar scripts com a pasta src/ nos dois sentidos
-	  • ler o Output, controlar Run/Play
-	Instalação: copie este arquivo para %LOCALAPPDATA%\Roblox\Plugins
-]]
+-- StudioLink: liga o Studio ao servidor local do projeto (bridge/server.js), em edit e no playtest.
 
 local VERSION = "1.5.2"
 local DEFAULT_PORT = 34880
@@ -64,7 +57,6 @@ local function savePlace()
 	markPort()
 end
 
--- estado pro painel
 local state = { conflict = nil, info = nil, lastCmd = nil, lastCmdAt = 0, lastError = nil, pending = nil }
 
 local function say(msg)
@@ -73,12 +65,14 @@ end
 
 ------------------------------------------------------------------ HTTP
 local function request(method, path, body)
-	local ok, res = pcall(HttpService.RequestAsync, HttpService, {
-		Url = "http://localhost:" .. port .. path,
-		Method = method,
-		Headers = { ["Content-Type"] = "application/json", ["X-Bridge"] = "1" },
-		Body = body ~= nil and HttpService:JSONEncode(body) or nil,
-	})
+	local ok, res = pcall(function()
+		return HttpService:RequestAsync({
+			Url = "http://localhost:" .. port .. path,
+			Method = method,
+			Headers = { ["Content-Type"] = "application/json", ["X-Bridge"] = "1" },
+			Body = body ~= nil and HttpService:JSONEncode(body) or nil,
+		})
+	end)
 	if not ok then return nil, tostring(res) end
 	if not res.Success then return nil, res.StatusCode .. " " .. res.Body, res.StatusCode end
 	if res.Body == "" then return true end
@@ -155,6 +149,12 @@ local function resolve(p)
 	return cur
 end
 
+local function resolveRef(p)
+	local inst, err = resolve(p)
+	if not inst then error(err, 0) end
+	return inst
+end
+
 local function tree(root, maxDepth, maxLines)
 	maxDepth = maxDepth or 2
 	maxLines = maxLines or 1500
@@ -216,13 +216,23 @@ end
 	Valores: Vector3/Vector2 [x,y,z] · Color3 "#hex", [r,g,b] 0-255 ou nome de BrickColor · UDim2 [xs,xo,ys,yo]
 	UDim [s,o] · CFrame [x,y,z] ou {pos,rot(graus)} ou {pos,lookAt} · Enum "Neon" · Font "FredokaOne" ou {family,weight,style}
 	NumberRange [min,max] · NumberSequence n ou [[t,v],...] · ColorSequence "#hex" ou [[t,"#hex"],...]
-	Rect [x0,y0,x1,y1] · PhysicalProperties [densidade,atrito,elasticidade] · referência a objeto "@Workspace/Peça"
+	Rect [x0,y0,x1,y1] · PhysicalProperties [densidade,atrito,elasticidade,pesoAtrito,pesoElasticidade]
+	referência a objeto "@Workspace/Peça" · infinito "inf"/"-inf"
 ]]
 local Obj = {}
 
 local function round(n)
 	if n ~= n then return 0 end
+	if n == math.huge then return "inf" end
+	if n == -math.huge then return "-inf" end
 	return math.round(n * 10000) / 10000
+end
+
+-- JSON não tem infinito: vai e volta como "inf"/"-inf"
+local function num(x)
+	if x == "inf" then return math.huge end
+	if x == "-inf" then return -math.huge end
+	return tonumber(x)
 end
 
 local function nums(v, n, name)
@@ -235,7 +245,7 @@ local function nums(v, n, name)
 	local keys = { "x", "y", "z", "w" }
 	local t = {}
 	for i = 1, n do
-		t[i] = tonumber(v[i] or v[keys[i]] or v[string.upper(keys[i])])
+		t[i] = num(v[i] or v[keys[i]] or v[string.upper(keys[i])])
 		if not t[i] then error(name .. ": esperava " .. n .. " números", 0) end
 	end
 	return t
@@ -262,7 +272,7 @@ local function toCFrame(v)
 	if type(v) ~= "table" then error("CFrame: use [x,y,z] ou {pos,rot}", 0) end
 	if #v == 12 then return CFrame.new(table.unpack(v)) end
 	if #v == 3 then return CFrame.new(v[1], v[2], v[3]) end
-	local pos = v.pos or v.position or { 0, 0, 0 }
+	local pos = v.pos or { 0, 0, 0 }
 	local p = Vector3.new(table.unpack(nums(pos, 3, "CFrame.pos")))
 	if v.lookAt then
 		return CFrame.lookAt(p, Vector3.new(table.unpack(nums(v.lookAt, 3, "CFrame.lookAt"))))
@@ -275,10 +285,10 @@ local function toFont(v)
 	if typeof(v) == "Font" then return v end
 	if type(v) == "string" then
 		if v:find("^rbxasset") then return Font.new(v) end
-		local ok, f = pcall(Font.fromName, v)
-		if ok then return f end
 		local okE, e = pcall(function() return Enum.Font[v] end)
 		if okE and e then return Font.fromEnum(e) end
+		local ok, f = pcall(Font.fromName, v)
+		if ok then return f end
 		error("fonte inválida: " .. v, 0)
 	end
 	local base = toFont(v.family or "BuilderSans")
@@ -307,17 +317,16 @@ local function seq(v, kind)
 	end
 end
 
-local function resolveRef(p)
-	local inst, err = resolve(p)
-	if not inst then error(err, 0) end
-	return inst
+-- "@caminho" só é referência se a propriedade guarda um objeto (Text = "@fulano" continua texto)
+local function isRef(inst, prop, v)
+	if type(v) ~= "string" or v:sub(1, 1) ~= "@" then return false end
+	local ok, cur = pcall(function() return inst[prop] end)
+	return ok and (cur == nil or typeof(cur) == "Instance")
 end
 
 -- converte o valor JSON pro tipo que a propriedade espera (descoberto pelo valor atual)
 function Obj.decode(inst, prop, v)
-	if type(v) == "string" and v:sub(1, 1) == "@" then
-		return resolveRef(v:sub(2))
-	end
+	if isRef(inst, prop, v) then return resolveRef(v:sub(2)) end
 	if v == nil or v == "nil" then return nil end
 	local ok, cur = pcall(function() return inst[prop] end)
 	if not ok then error(inst.ClassName .. " não tem a propriedade " .. prop, 0) end
@@ -326,13 +335,7 @@ function Obj.decode(inst, prop, v)
 	if t == "Vector2" then return Vector2.new(table.unpack(nums(v, 2, prop))) end
 	if t == "Color3" then return toColor3(v) end
 	if t == "BrickColor" then return type(v) == "string" and BrickColor.new(v) or BrickColor.new(toColor3(v)) end
-	if t == "UDim2" then
-		if type(v) == "table" and (v.scale or v.offset) then
-			local s, o = nums(v.scale or { 0, 0 }, 2, prop), nums(v.offset or { 0, 0 }, 2, prop)
-			return UDim2.new(s[1], o[1], s[2], o[2])
-		end
-		return UDim2.new(table.unpack(nums(v, 4, prop)))
-	end
+	if t == "UDim2" then return UDim2.new(table.unpack(nums(v, 4, prop))) end
 	if t == "UDim" then return UDim.new(table.unpack(nums(v, 2, prop))) end
 	if t == "CFrame" then return toCFrame(v) end
 	if t == "EnumItem" then
@@ -342,8 +345,8 @@ function Obj.decode(inst, prop, v)
 	end
 	if t == "Font" then return toFont(v) end
 	if t == "NumberRange" then
-		if type(v) == "number" then return NumberRange.new(v) end
-		return NumberRange.new(v[1], v[2] or v[1])
+		if type(v) ~= "table" then return NumberRange.new(num(v)) end
+		return NumberRange.new(num(v[1]), num(v[2] or v[1]))
 	end
 	if t == "NumberSequence" or t == "ColorSequence" then return seq(v, t) end
 	if t == "Rect" then return Rect.new(table.unpack(nums(v, 4, prop))) end
@@ -355,7 +358,7 @@ function Obj.decode(inst, prop, v)
 		local okC, c = pcall(Content.fromUri, v)
 		if okC then return c end
 	end
-	if t == "number" and type(v) == "string" then return tonumber(v) end
+	if t == "number" and type(v) == "string" then return num(v) end
 	return v
 end
 
@@ -396,7 +399,9 @@ function Obj.encode(v)
 		return out
 	end
 	if t == "Rect" then return { round(v.Min.X), round(v.Min.Y), round(v.Max.X), round(v.Max.Y) } end
-	if t == "PhysicalProperties" then return { round(v.Density), round(v.Friction), round(v.Elasticity) } end
+	if t == "PhysicalProperties" then
+		return { round(v.Density), round(v.Friction), round(v.Elasticity), round(v.FrictionWeight), round(v.ElasticityWeight) }
+	end
 	if t == "Instance" then return "@" .. instPath(v) end
 	if t == "Content" then return v.Uri or "" end
 	return tostring(v)
@@ -411,20 +416,20 @@ local CANDIDATES = {
 	"PrimaryPart", "WorldPivot", "LevelOfDetail", "ModelStreamingMode",
 	-- UI
 	"Enabled", "ResetOnSpawn", "IgnoreGuiInset", "ZIndexBehavior", "DisplayOrder", "ScreenInsets",
-	"AnchorPoint", "Position", "Size", "Rotation", "Visible", "ZIndex", "LayoutOrder", "ClipsDescendants",
+	"AnchorPoint", "Position", "Rotation", "Visible", "ZIndex", "LayoutOrder", "ClipsDescendants",
 	"AutomaticSize", "BackgroundColor3", "BackgroundTransparency", "BorderSizePixel", "Active", "Selectable",
 	"Text", "RichText", "FontFace", "TextSize", "TextColor3", "TextTransparency", "TextScaled", "TextWrapped",
 	"TextXAlignment", "TextYAlignment", "TextStrokeColor3", "TextStrokeTransparency", "TextTruncate", "LineHeight",
 	"PlaceholderText", "ClearTextOnFocus", "AutoButtonColor",
 	"Image", "ImageColor3", "ImageTransparency", "ScaleType", "SliceCenter", "TileSize", "ImageRectOffset", "ImageRectSize",
 	"CanvasSize", "AutomaticCanvasSize", "ScrollBarThickness", "ScrollingDirection",
-	"CornerRadius", "Thickness", "ApplyStrokeMode", "LineJoinMode", "Rotation", "Offset", "Scale", "AspectRatio",
+	"CornerRadius", "Thickness", "ApplyStrokeMode", "LineJoinMode", "Offset", "Scale", "AspectRatio",
 	"Padding", "PaddingTop", "PaddingBottom", "PaddingLeft", "PaddingRight", "FillDirection", "HorizontalAlignment",
 	"VerticalAlignment", "SortOrder", "CellSize", "CellPadding", "Wraps", "MaxSize", "MinSize",
 	"StudsOffset", "StudsOffsetWorldSpace", "AlwaysOnTop", "MaxDistance", "LightInfluence", "Face", "SizingMode",
-	"PixelsPerStud", "CanvasSize", "Adornee",
+	"PixelsPerStud", "Adornee",
 	-- luz, efeitos, som
-	"Brightness", "Range", "Shadows", "Angle", "Color", "Rate", "Lifetime", "Speed", "SpreadAngle", "Texture",
+	"Brightness", "Range", "Shadows", "Angle", "Rate", "Lifetime", "Speed", "SpreadAngle", "Texture",
 	"LightEmission", "Acceleration", "Drag", "EmissionDirection", "RotSpeed", "Orientation", "ZOffset", "LockedToPart",
 	"SparkleColor", "Heat", "SecondaryColor", "Opacity", "RiseVelocity",
 	"Attachment0", "Attachment1", "Width0", "Width1", "FaceCamera", "Segments", "CurveSize0", "CurveSize1", "TextureLength",
@@ -432,17 +437,10 @@ local CANDIDATES = {
 	"SoundId", "Volume", "Looped", "PlaybackSpeed", "RollOffMaxDistance", "RollOffMinDistance", "PlayOnRemove",
 	"StudsPerTileU", "StudsPerTileV", "OffsetStudsU", "OffsetStudsV", "Color3",
 	-- outros
-	"Value", "Part0", "Part1", "C0", "C1", "MaxVelocity", "DesiredAngle", "Visible",
+	"Value", "Part0", "Part1", "C0", "C1", "MaxVelocity", "DesiredAngle",
 	"Ambient", "OutdoorAmbient", "ClockTime", "FogEnd", "FogStart", "FogColor", "GlobalShadows", "ExposureCompensation",
 	"Density", "Haze", "Glare", "Decay", "Intensity", "Threshold", "Contrast", "Saturation", "TintColor",
 }
-do
-	local seen, list = {}, {}
-	for _, n in ipairs(CANDIDATES) do
-		if not seen[n] then seen[n] = true; table.insert(list, n) end
-	end
-	CANDIDATES = list
-end
 
 local defaults = {}
 local function defaultOf(className)
@@ -455,7 +453,7 @@ end
 
 local function same(a, b)
 	if typeof(a) ~= typeof(b) then return false end
-	if typeof(a) == "number" then return math.abs(a - b) < 1e-4 end
+	if typeof(a) == "number" then return a == b or math.abs(a - b) < 1e-4 end
 	if typeof(a) == "CFrame" then return a:FuzzyEq(b, 1e-4) end
 	return a == b
 end
@@ -503,40 +501,26 @@ function Obj.serialize(inst, depth, onlyProps)
 	return node
 end
 
+local function setProp(inst, k, v, errs)
+	local ok, err = pcall(function() inst[k] = Obj.decode(inst, k, v) end)
+	if not ok then table.insert(errs, k .. ": " .. tostring(err)) end
+end
+
+-- Devolve os erros, o Parent pedido em props e `finish`, que roda depois do Parent: referências ("@caminho"),
+-- PrimaryPart e pivot/move só resolvem com o objeto (e os filhos) já no lugar.
 local function applyProps(inst, spec)
-	local errs = {}
-	-- Parent e CFrame por último (Size antes de CFrame; não reparentar antes de configurar)
-	local later = {}
+	local errs, later, refs = {}, {}, {}
 	for k, v in pairs(spec.props or {}) do
-		if k == "Parent" or k == "CFrame" or k == "Position" and inst:IsA("BasePart") or k == "PrimaryPart" then
+		if k == "Parent" or k == "CFrame" or k == "Position" and inst:IsA("BasePart") then
 			later[k] = v
+		elseif k == "PrimaryPart" or isRef(inst, k, v) then
+			refs[k] = v
 		else
-			local ok, err = pcall(function() inst[k] = Obj.decode(inst, k, v) end)
-			if not ok then table.insert(errs, k .. ": " .. tostring(err)) end
+			setProp(inst, k, v, errs)
 		end
 	end
-	for _, k in ipairs({ "PrimaryPart", "CFrame", "Position" }) do
-		if later[k] ~= nil then
-			local ok, err = pcall(function() inst[k] = Obj.decode(inst, k, later[k]) end)
-			if not ok then table.insert(errs, k .. ": " .. tostring(err)) end
-		end
-	end
-	-- pivot: move o objeto inteiro (Model ou parte). Sem "rot"/"lookAt" mantém a rotação atual.
-	-- move: [dx,dy,dz] desloca a partir de onde está.
-	if (spec.pivot or spec.move) and (inst:IsA("Model") or inst:IsA("BasePart")) then
-		local ok, err = pcall(function()
-			local cur = inst:GetPivot()
-			local target = cur
-			if spec.pivot then
-				local pv = spec.pivot
-				local keepRot = type(pv) == "table" and (#pv == 3 or (pv.rot == nil and pv.lookAt == nil))
-				target = toCFrame(pv)
-				if keepRot then target = CFrame.new(target.Position) * cur.Rotation end
-			end
-			if spec.move then target = target + Vector3.new(table.unpack(nums(spec.move, 3, "move"))) end
-			inst:PivotTo(target)
-		end)
-		if not ok then table.insert(errs, "pivot: " .. tostring(err)) end
+	for _, k in ipairs({ "CFrame", "Position" }) do -- depois do Size
+		if later[k] ~= nil then setProp(inst, k, later[k], errs) end
 	end
 	for k, v in pairs(spec.attributes or {}) do
 		local ok, err = pcall(function()
@@ -547,69 +531,95 @@ local function applyProps(inst, spec)
 	end
 	for _, tag in ipairs(spec.tags or {}) do inst:AddTag(tag) end
 	if spec.name then inst.Name = spec.name end
-	return errs, later.Parent
+
+	local function finish()
+		for k, v in pairs(refs) do setProp(inst, k, v, errs) end
+		-- pivot move o objeto inteiro (Model ou parte); sem "rot"/"lookAt" mantém a rotação. move: [dx,dy,dz].
+		if (spec.pivot or spec.move) and (inst:IsA("Model") or inst:IsA("BasePart")) then
+			local ok, err = pcall(function()
+				local cur = inst:GetPivot()
+				local target = cur
+				if spec.pivot then
+					local pv = spec.pivot
+					local keepRot = type(pv) == "table" and (#pv == 3 or (pv.rot == nil and pv.lookAt == nil))
+					target = toCFrame(pv)
+					if keepRot then target = CFrame.new(target.Position) * cur.Rotation end
+				end
+				if spec.move then target = target + Vector3.new(table.unpack(nums(spec.move, 3, "move"))) end
+				inst:PivotTo(target)
+			end)
+			if not ok then table.insert(errs, "pivot: " .. tostring(err)) end
+		end
+	end
+	return errs, later.Parent, finish
 end
 
-local function build(spec, parent, errs, created)
+-- `finishers` junta os `finish` da árvore toda pra rodar quando a raiz já está no jogo (filhos antes do pai).
+local function build(spec, parent, errs, finishers)
 	if type(spec) ~= "table" or type(spec.class) ~= "string" then error("cada objeto precisa de \"class\"", 0) end
 	local ok, inst = pcall(Instance.new, spec.class)
 	if not ok then error("classe inválida: " .. spec.class, 0) end
 	inst.Name = spec.name or spec.class
-	local e, parentRef = applyProps(inst, spec)
-	for _, m in ipairs(e) do table.insert(errs, inst.Name .. "." .. m) end
-	for _, child in ipairs(spec.children or {}) do build(child, inst, errs, nil) end
+	local e, parentRef, finish = applyProps(inst, spec)
+	for _, child in ipairs(spec.children or {}) do build(child, inst, errs, finishers) end
 	if spec.source and inst:IsA("LuaSourceContainer") then inst.Source = spec.source end
 	inst.Parent = parentRef and Obj.decode(inst, "Parent", parentRef) or parent
-	if created then table.insert(created, inst) end
+	table.insert(finishers, function()
+		finish()
+		for _, m in ipairs(e) do table.insert(errs, inst.Name .. "." .. m) end
+	end)
 	return inst
 end
 
+-- Um passo de Ctrl+Z em modo edição. Se fn der erro, a gravação é cancelada e o erro segue.
 local function rec(name, fn)
-	local r = (ROLE == "edit" and not RunService:IsRunning()) and select(2, pcall(ChangeHistoryService.TryBeginRecording, ChangeHistoryService, name)) or nil
+	local r
+	if ROLE == "edit" and not RunService:IsRunning() then
+		local okB, id = pcall(ChangeHistoryService.TryBeginRecording, ChangeHistoryService, name)
+		r = okB and id or nil
+	end
 	local ok, res = pcall(fn)
-	if r then pcall(ChangeHistoryService.FinishRecording, ChangeHistoryService, r, Enum.FinishRecordingOperation.Commit) end
+	if r then
+		local op = ok and Enum.FinishRecordingOperation.Commit or Enum.FinishRecordingOperation.Cancel
+		pcall(ChangeHistoryService.FinishRecording, ChangeHistoryService, r, op)
+	end
 	if not ok then error(res, 0) end
 	return res
 end
 
 function Obj.create(cmd)
 	return rec("Claude: create", function()
-		local parent = game.Workspace
-		if cmd.parent then
-			local p, err = resolve(cmd.parent)
-			if not p then error(err, 0) end
-			parent = p
-		end
+		local parent = cmd.parent and resolveRef(cmd.parent) or game.Workspace
 		local specs = cmd.spec
 		if specs.class then specs = { specs } end
-		local errs, created = {}, {}
+		local errs, created, finishers = {}, {}, {}
 		for _, spec in ipairs(specs) do
 			if cmd.replace and spec.name then
 				local old = parent:FindFirstChild(spec.name)
 				if old then old:Destroy() end
 			end
-			build(spec, parent, errs, created)
+			table.insert(created, build(spec, parent, errs, finishers))
 		end
+		for _, f in ipairs(finishers) do f() end
 		local paths = {}
 		for _, inst in ipairs(created) do table.insert(paths, instPath(inst)) end
-		if cmd.select ~= false and ROLE == "edit" then pcall(function() game:GetService("Selection"):Set(created) end) end
+		if ROLE == "edit" then pcall(function() game:GetService("Selection"):Set(created) end) end
 		return { ok = #errs == 0, created = paths, error = #errs > 0 and ("alguns valores falharam:\n" .. table.concat(errs, "\n")) or nil }
 	end)
 end
 
 function Obj.set(cmd)
 	return rec("Claude: set", function()
-		local inst, err = resolve(cmd.path)
-		if not inst then error(err, 0) end
-		local errs, parentRef = applyProps(inst, cmd)
+		local inst = resolveRef(cmd.path)
+		local errs, parentRef, finish = applyProps(inst, cmd)
 		if parentRef then inst.Parent = Obj.decode(inst, "Parent", parentRef) end
+		finish()
 		return { ok = #errs == 0, path = instPath(inst), error = #errs > 0 and table.concat(errs, "\n") or nil }
 	end)
 end
 
 function Obj.get(cmd)
-	local inst, err = resolve(cmd.path)
-	if not inst then return { ok = false, error = err } end
+	local inst = resolveRef(cmd.path)
 	if inst == game then return { ok = false, error = "use um caminho, ex.: Workspace/Peça" } end
 	return { ok = true, object = Obj.serialize(inst, tonumber(cmd.depth) or 0, cmd.props) }
 end
@@ -619,8 +629,7 @@ function Obj.delete(cmd)
 		local paths = type(cmd.path) == "table" and cmd.path or { cmd.path }
 		local removed = {}
 		for _, p in ipairs(paths) do
-			local inst, err = resolve(p)
-			if not inst then error(err, 0) end
+			local inst = resolveRef(p)
 			if inst.Parent == game or inst == game then error("não dá pra apagar um serviço: " .. p, 0) end
 			table.insert(removed, instPath(inst))
 			inst:Destroy()
@@ -631,32 +640,17 @@ end
 
 function Obj.clone(cmd)
 	return rec("Claude: clone", function()
-		local inst, err = resolve(cmd.path)
-		if not inst then error(err, 0) end
+		local inst = resolveRef(cmd.path)
 		local copy = inst:Clone()
 		if not copy then error("objeto não pode ser clonado (Archivable = false?)", 0) end
-		if cmd.name then copy.Name = cmd.name end
-		local parent = inst.Parent
-		if cmd.parent then
-			local p, perr = resolve(cmd.parent)
-			if not p then error(perr, 0) end
-			parent = p
-		end
-		if cmd.props then applyProps(copy, cmd) end
-		copy.Parent = parent
-		return { ok = true, created = { instPath(copy) } }
+		local errs, _, finish = applyProps(copy, cmd)
+		copy.Parent = cmd.parent and resolveRef(cmd.parent) or inst.Parent
+		finish()
+		return { ok = #errs == 0, created = { instPath(copy) }, error = #errs > 0 and table.concat(errs, "\n") or nil }
 	end)
 end
 
 ------------------------------------------------------------------ executar Luau
-local function beginRec(name)
-	if ROLE ~= "edit" or RunService:IsRunning() then return nil end
-	local ok, rec = pcall(ChangeHistoryService.TryBeginRecording, ChangeHistoryService, name)
-	return ok and rec or nil
-end
-local function endRec(rec)
-	if rec then pcall(ChangeHistoryService.FinishRecording, ChangeHistoryService, rec, Enum.FinishRecordingOperation.Commit) end
-end
 
 -- loadstring não existe nos DataModels do playtest; lá o código vira um ModuleScript temporário.
 local function compile(code, name)
@@ -690,7 +684,6 @@ local function compile(code, name)
 			end
 			error("erro de compilação: " .. detail, 0)
 		end
-		-- o módulo devolve uma função que recebe os helpers
 		return nil, factory
 	end
 end
@@ -723,21 +716,22 @@ local function runCode(code, name)
 	end
 	local pr, wr = capture(""), capture("[warn] ")
 
-	local rec = beginRec("Claude: " .. name)
 	local t0 = os.clock()
-	local done, packed = false, nil
-	task.spawn(function()
-		packed = table.pack(xpcall(function()
-			local env = setmetatable({ print = pr, warn = wr, B = B, plugin = plugin }, { __index = getfenv(1) })
-			local okL, fn, factory = pcall(loader, env)
-			if not okL then error(fn, 0) end
-			if fn then return fn() end
-			return factory(pr, wr, B, plugin) -- caminho do ModuleScript (playtest)
-		end, function(e) return debug.traceback(tostring(e), 2) end))
-		done = true
+	local packed
+	rec("Claude: " .. name, function()
+		local done = false
+		task.spawn(function()
+			packed = table.pack(xpcall(function()
+				local env = setmetatable({ print = pr, warn = wr, B = B, plugin = plugin }, { __index = getfenv(1) })
+				local okL, fn, factory = pcall(loader, env)
+				if not okL then error(fn, 0) end
+				if fn then return fn() end
+				return factory(pr, wr, B, plugin) -- caminho do ModuleScript (playtest)
+			end, function(e) return debug.traceback(tostring(e), 2) end))
+			done = true
+		end)
+		while not done do task.wait() end
 	end)
-	while not done do task.wait() end
-	endRec(rec)
 
 	local ms = math.floor((os.clock() - t0) * 1000)
 	if not packed[1] then
@@ -748,7 +742,7 @@ local function runCode(code, name)
 	return { ok = true, output = output, returns = returns, ms = ms }
 end
 
------------------------------------------------------------------- teste bruteforce (audit_ui, audit_world, fuzz_input) e assets
+------------------------------------------------------------------ teste bruteforce (audit_ui, audit_world, fuzz_input)
 local Fuzz = {}
 
 local function addIssue(list, kind, where, detail, extra)
@@ -958,13 +952,14 @@ function Fuzz.input(cmd)
 	local t0 = os.clock()
 	local deaths = 0
 	local maxButtons = 0
+	local hooks = {}
 	local _, startHum = waitChar(10)
 	if startHum then
-		startHum.Died:Connect(function() deaths += 1 end)
-		lp.CharacterAdded:Connect(function(c)
+		table.insert(hooks, startHum.Died:Connect(function() deaths += 1 end))
+		table.insert(hooks, lp.CharacterAdded:Connect(function(c)
 			local h = c:WaitForChild("Humanoid", 5)
-			if h then h.Died:Connect(function() deaths += 1 end) end
-		end)
+			if h then table.insert(hooks, h.Died:Connect(function() deaths += 1 end)) end
+		end))
 	end
 
 	while os.clock() - t0 < seconds do
@@ -975,7 +970,6 @@ function Fuzz.input(cmd)
 		end
 		local roll = rng:NextNumber()
 		if roll < 0.45 then
-			-- anda até uma superfície aleatória (ou um ponto perto)
 			local goal
 			if #spots > 0 and rng:NextNumber() < 0.7 then
 				local p = spots[rng:NextInteger(1, #spots)]
@@ -1032,22 +1026,19 @@ function Fuzz.input(cmd)
 			addIssue(events, "caiu do mapa", ("em (%.0f, %.0f)"):format(r2.Position.X, r2.Position.Z), "personagem abaixo do limite do mundo")
 		end
 	end
+	for _, c in ipairs(hooks) do c:Disconnect() end
 	if deaths > 0 then addIssue(events, "morreu", "jogador", deaths .. " morte(s) durante o teste") end
 	return { ok = true, segundos = math.floor(os.clock() - t0), acoes = actions, cliquesReais = canClick,
 		superficies = #spots, botoesVisiveis = maxButtons,
 		nota = maxButtons == 0 and "nenhum botão visível durante o teste (nada pra clicar)" or nil, eventos = strip(events) }
 end
 
--- Assets: insere um asset do Roblox (modelo, mesh, decal, áudio) pelo id
-function Fuzz.insert(cmd)
+------------------------------------------------------------------ assets
+-- Insere um asset do Roblox (modelo, mesh, decal, áudio) pelo id.
+local function insertAsset(cmd)
 	local id = tonumber(cmd.assetId)
 	if not id then return { ok = false, error = "assetId inválido" } end
-	local parent = workspace
-	if cmd.parent then
-		local p, err = resolve(cmd.parent)
-		if not p then return { ok = false, error = err } end
-		parent = p
-	end
+	local parent = cmd.parent and resolveRef(cmd.parent) or workspace
 	local ok, model = pcall(function() return game:GetService("InsertService"):LoadAsset(id) end)
 	if not ok then return { ok = false, error = "LoadAsset falhou: " .. tostring(model) .. " (o asset é seu e já foi aprovado pela moderação?)" } end
 	local created, info = {}, {}
@@ -1059,45 +1050,35 @@ function Fuzz.insert(cmd)
 		model:Destroy()
 		return { ok = true, info = info }
 	end
-	local r = beginRec("Claude: insert " .. id)
-	for _, child in ipairs(model:GetChildren()) do
-		if cmd.name and #model:GetChildren() == 1 then child.Name = cmd.name end
-		child.Parent = parent
-		-- o import de FBX deixa o MeshPart com PivotOffset girado 90°: zera pra PivotTo/PrimaryPart não deitarem o modelo
-		for _, d in ipairs(child:IsA("BasePart") and { child } or child:GetDescendants()) do
-			if d:IsA("BasePart") then d.PivotOffset = CFrame.new() end
+	local kids = model:GetChildren()
+	rec("Claude: insert " .. id, function()
+		for _, child in ipairs(kids) do
+			if cmd.name and #kids == 1 then child.Name = cmd.name end
+			child.Parent = parent
+			-- o import de FBX deixa o MeshPart com PivotOffset girado 90°: zera pra PivotTo/PrimaryPart não deitarem o modelo
+			for _, d in ipairs(child:IsA("BasePart") and { child } or child:GetDescendants()) do
+				if d:IsA("BasePart") then d.PivotOffset = CFrame.new() end
+			end
+			if child:IsA("Model") and not child.PrimaryPart then
+				child.PrimaryPart = child:FindFirstChildWhichIsA("BasePart", true)
+			end
+			table.insert(created, instPath(child))
+			if child:IsA("Decal") or child:IsA("Texture") then info.imageUri = child.Texture end
+			if child:IsA("MeshPart") then info.meshId = child.MeshID; info.textureId = child.TextureID end
 		end
-		if child:IsA("Model") and not child.PrimaryPart then
-			child.PrimaryPart = child:FindFirstChildWhichIsA("BasePart", true)
-		end
-		table.insert(created, instPath(child))
-		if child:IsA("Decal") or child:IsA("Texture") then info.imageUri = child.Texture end
-		if child:IsA("MeshPart") then info.meshId = child.MeshID; info.textureId = child.TextureID end
-	end
-	endRec(r)
+	end)
 	model:Destroy()
-	if cmd.pivot then
-		for _, p in ipairs(created) do
-			local inst = resolve(p)
-			if inst and (inst:IsA("Model") or inst:IsA("BasePart")) then pcall(function() inst:PivotTo(CFrame.new(table.unpack(cmd.pivot))) end) end
-		end
-	end
 	return { ok = true, created = created, info = info }
 end
 
 ------------------------------------------------------------------ playtest
-local function testService()
-	local ok, sts = pcall(game.GetService, game, "StudioTestService")
-	if ok then return sts end
-	return nil
-end
-
 local function doPlay(action)
-	local sts = testService()
+	local okS, sts = pcall(game.GetService, game, "StudioTestService")
+	if not okS then sts = nil end
 	if action == "run" or action == "test" then
 		if RunService:IsRunning() then return { ok = false, error = "já tem um teste rodando (play stop primeiro)" } end
 		if not sts then return { ok = false, error = "StudioTestService indisponível nesta versão do Studio" } end
-		-- Os dois rodam numa CÓPIA do place (como os botões do Studio): nada do teste fica no place.
+		-- Os dois rodam numa cópia do place (como os botões do Studio): nada do teste fica no place.
 		local method = action == "run" and "ExecuteRunModeAsync" or "ExecutePlayModeAsync"
 		task.spawn(function()
 			local okRun, err = pcall(function() return sts[method](sts, {}) end)
@@ -1131,7 +1112,11 @@ local dirty = {}
 local lastSent = setmetatable({}, { __mode = "k" })
 local warned = {}
 
+local DEVICES = { con = true, prn = true, aux = true, nul = true } -- o Windows não cria arquivo com esses nomes
+
 local function validName(n)
+	local base = string.lower(string.match(n, "^[^%.]*"))
+	if DEVICES[base] or string.find(base, "^com%d$") or string.find(base, "^lpt%d$") then return false end
 	return n ~= "" and not string.find(n, BAD_CHARS) and not string.find(n, "[%. ]$")
 end
 
@@ -1203,25 +1188,31 @@ local function untrack(s, sendDelete)
 	if sendDelete and connected then request("POST", "/sync", { type = "delete", file = file }) end
 end
 
+local snapshotBusy = false
 local function sendSnapshot()
-	for s in pairs(tracked) do untrack(s, false) end
-	local scripts = {}
-	for root in pairs(syncRoots) do
-		for _, d in ipairs(root:GetDescendants()) do
-			if SUFFIX[d.ClassName] then
-				local file = track(d, true)
-				if file then table.insert(scripts, { file = file, source = lastSent[d] }) end
+	if snapshotBusy then return { ok = false, error = "já tem um snapshot em andamento" } end
+	snapshotBusy = true
+	local ok, res = pcall(function()
+		for s in pairs(tracked) do untrack(s, false) end
+		local scripts = {}
+		for root in pairs(syncRoots) do
+			for _, d in ipairs(root:GetDescendants()) do
+				if SUFFIX[d.ClassName] then
+					local file = track(d, true)
+					if file then table.insert(scripts, { file = file, source = lastSent[d] }) end
+				end
 			end
 		end
-	end
-	local res, err = request("POST", "/snapshot", { scripts = scripts })
-	if res then
-		local ask = type(res) == "table" and type(res.perguntar) == "table" and #res.perguntar > 0 and res.perguntar or nil
+		local data, err = request("POST", "/snapshot", { scripts = scripts })
+		if not data then return { ok = false, error = "snapshot falhou: " .. tostring(err) } end
+		local ask = type(data) == "table" and type(data.perguntar) == "table" and #data.perguntar > 0 and data.perguntar or nil
 		state.pending = ask -- o painel abre e pergunta
 		say(("sincronizado: %d scripts"):format(#scripts) .. (ask and (" | %d diferentes entre Studio e disco: escolha no painel"):format(#ask) or ""))
 		return { ok = true, scripts = #scripts, esperandoEscolha = ask and #ask or nil }
-	end
-	return { ok = false, error = "snapshot falhou: " .. tostring(err) }
+	end)
+	snapshotBusy = false
+	if not ok then error(res, 0) end
+	return res
 end
 
 -- choice: "disco" ou "studio". Manda a versão atual do Studio (pode ter mudado enquanto o painel esperava).
@@ -1242,9 +1233,9 @@ local function resolvePending(choice)
 	end
 end
 
-local function findScript(parent, leaf)
+local function findScript(parent, leaf, cls)
 	for _, c in ipairs(parent:GetChildren()) do
-		if c.Name == leaf and c:IsA("LuaSourceContainer") then return c end
+		if c.Name == leaf and c.ClassName == cls then return c end
 	end
 	return nil
 end
@@ -1268,38 +1259,34 @@ end
 local function applyWrite(file, src)
 	local cls, segs = parseFile(file)
 	if not cls then return { ok = false, error = "extensão desconhecida: " .. file } end
-	local rec = beginRec("Claude sync: " .. file)
-	local parent, err = locateParent(segs, true)
-	if not parent then endRec(rec); return { ok = false, error = err } end
-	local leaf = segs[#segs]
-	local s = findScript(parent, leaf)
-	if s then
-		lastSent[s] = src
-		local ok = pcall(function()
-			ScriptEditorService:UpdateSourceAsync(s, function() return src end)
-		end)
-		if not ok then s.Source = src end
-	else
-		s = Instance.new(cls)
-		s.Name = leaf
-		s.Source = src
-		lastSent[s] = src
-		s.Parent = parent
-	end
-	endRec(rec)
-	return { ok = true }
+	return rec("Claude sync: " .. file, function()
+		local parent, err = locateParent(segs, true)
+		if not parent then return { ok = false, error = err } end
+		local leaf = segs[#segs]
+		local s = findScript(parent, leaf, cls)
+		if s then
+			lastSent[s] = src
+			local ok = pcall(function()
+				ScriptEditorService:UpdateSourceAsync(s, function() return src end)
+			end)
+			if not ok then s.Source = src end
+		else
+			s = Instance.new(cls)
+			s.Name = leaf
+			s.Source = src
+			lastSent[s] = src
+			s.Parent = parent
+		end
+		return { ok = true }
+	end)
 end
 
 local function applyDelete(file)
 	local cls, segs = parseFile(file)
 	if not cls then return { ok = false } end
 	local parent = locateParent(segs, false)
-	local s = parent and findScript(parent, segs[#segs])
-	if s then
-		local rec = beginRec("Claude sync: apagar " .. file)
-		s.Parent = nil
-		endRec(rec)
-	end
+	local s = parent and findScript(parent, segs[#segs], cls)
+	if s then rec("Claude sync: apagar " .. file, function() s.Parent = nil end) end
 	return { ok = true }
 end
 
@@ -1335,17 +1322,22 @@ if ROLE == "edit" then
 			end
 			wasRunning = running
 			if syncActive() then
+				local retry = {}
 				for s in pairs(dirty) do
 					dirty[s] = nil
 					local file = tracked[s]
 					if file then
 						local src = editorSource(s)
 						if lastSent[s] ~= src then
-							lastSent[s] = src
-							request("POST", "/sync", { type = "write", file = file, source = src })
+							if request("POST", "/sync", { type = "write", file = file, source = src }) then
+								lastSent[s] = src
+							else
+								table.insert(retry, s) -- não chegou no disco: tenta de novo
+							end
 						end
 					end
 				end
+				for _, s in ipairs(retry) do dirty[s] = true end
 				if tick % 5 == 0 then
 					local list = {}
 					for s, file in pairs(tracked) do table.insert(list, { s, file }) end
@@ -1371,17 +1363,20 @@ end
 ------------------------------------------------------------------ Output → servidor
 local logBuf = {}
 local clientBuf = {} -- no server: o que o client mandou, esperando o server conectar no bridge
+local function pushLog(buf, e)
+	table.insert(buf, e)
+	if #buf > 500 then table.remove(buf, 1) end -- fica com as 500 mais novas
+end
 -- no Play o plugin carrega depois dos scripts do jogo: o que saiu antes (ex.: erro na largada) só está no histórico.
 -- Lido e conectado sem yield no meio, então nada entra duas vezes; o atributo evita reenviar se o plugin recarregar.
 if ROLE ~= "edit" and not LogService:GetAttribute("StudioLinkSeeded") then
 	pcall(LogService.SetAttribute, LogService, "StudioLinkSeeded", true)
 	for _, e in ipairs(LogService:GetLogHistory()) do
-		if #logBuf >= 500 then break end
-		table.insert(logBuf, { kind = e.messageType.Name, msg = e.message })
+		pushLog(logBuf, { kind = e.messageType.Name, msg = e.message })
 	end
 end
 LogService.MessageOut:Connect(function(msg, mtype)
-	if #logBuf < 500 then table.insert(logBuf, { kind = mtype.Name, msg = msg }) end
+	pushLog(logBuf, { kind = mtype.Name, msg = msg })
 end)
 task.spawn(function()
 	while alive do
@@ -1420,27 +1415,24 @@ local function handle(cmd)
 		return res
 	end
 	local t = cmd.type
-	if t == "run" then return runCode(cmd.code, cmd.name) end
-	if t == "tree" then
-		local inst, err = resolve(cmd.path)
-		if not inst then return { ok = false, error = err } end
-		return { ok = true, text = tree(inst, cmd.depth) }
+	-- write/delete com `file` são do sync de scripts; delete sem `file` é de objeto
+	if ROLE == "edit" and cmd.file then
+		if t == "write" then return applyWrite(cmd.file, cmd.source) end
+		if t == "delete" then return applyDelete(cmd.file) end
 	end
+	if t == "run" then return runCode(cmd.code, cmd.name) end
+	if t == "tree" then return { ok = true, text = tree(resolveRef(cmd.path or "Workspace"), cmd.depth) } end
 	if t == "play" then return doPlay(cmd.action) end
 	if t == "audit_ui" then return Fuzz.auditUI() end
 	if t == "audit_world" then return Fuzz.auditWorld() end
 	if t == "fuzz_input" then return Fuzz.input(cmd) end
-	if t == "insert" then return Fuzz.insert(cmd) end
+	if t == "insert" then return insertAsset(cmd) end
 	if t == "create" then return Obj.create(cmd) end
 	if t == "set" then return Obj.set(cmd) end
 	if t == "get" then return Obj.get(cmd) end
 	if t == "delete" then return Obj.delete(cmd) end
 	if t == "clone" then return Obj.clone(cmd) end
-	if ROLE == "edit" then
-		if t == "write" then return applyWrite(cmd.file, cmd.source) end
-		if t == "delete" then return applyDelete(cmd.file) end
-		if t == "snapshot" then return sendSnapshot() end
-	end
+	if ROLE == "edit" and t == "snapshot" then return sendSnapshot() end
 	return { ok = false, error = "comando desconhecido aqui (" .. ROLE .. "): " .. tostring(t) }
 end
 
@@ -1456,7 +1448,12 @@ task.spawn(function()
 			local function exec()
 				local ok, res = pcall(handle, cmd)
 				if not ok then res = { ok = false, error = tostring(res) } end
-				if cmd.reply then request("POST", "/result", { id = cmd.id, result = res }) end
+				if cmd.reply then
+					local sent, err = request("POST", "/result", { id = cmd.id, result = res })
+					if not sent then
+						request("POST", "/result", { id = cmd.id, result = { ok = false, error = "resultado não serializável: " .. tostring(err) } })
+					end
+				end
 			end
 			-- sync de arquivos em ordem; o resto em paralelo (um comando travado não segura os outros)
 			if cmd.type == "write" or cmd.type == "delete" or cmd.type == "snapshot" then
@@ -1472,17 +1469,18 @@ local fails = 0
 if ROLE ~= "client" then task.spawn(function()
 	while alive do
 		if not enabled then
-			if connected then connected = false end
+			connected = false
 			task.wait(1)
 			continue
 		end
 		local cmds, perr, status = request("GET", ("/poll?role=%s&sid=%s&place=%s"):format(ROLE, SID, HttpService:UrlEncode(game.Name)))
+		if not enabled then continue end -- desligaram enquanto o poll esperava
 		if status == 409 then
 			-- outra janela do Studio já usa esse servidor
 			local okJ, body = pcall(HttpService.JSONDecode, HttpService, string.match(perr, "^%d+ (.*)$") or "")
 			if not state.conflict then say("porta " .. port .. " já está sendo usada por outra janela do Studio") end
 			state.conflict = okJ and body.place or "outra janela"
-			if connected then connected = false end
+			connected = false
 			task.wait(3)
 			continue
 		end
@@ -1528,10 +1526,7 @@ if ROLE == "server" then
 	-- o 1º lote do client (com os erros da largada) costuma chegar antes do server conectar: guarda em vez de descartar
 	relayLog.OnServerEvent:Connect(function(_, batch)
 		if type(batch) ~= "table" then return end
-		for _, e in ipairs(batch) do
-			if #clientBuf >= 500 then break end
-			table.insert(clientBuf, e)
-		end
+		for _, e in ipairs(batch) do pushLog(clientBuf, e) end
 	end)
 elseif ROLE == "client" then
 	local rs = game:GetService("ReplicatedStorage")
@@ -1580,18 +1575,6 @@ local function setPort(p)
 	savePlace()
 	if was then say("trocando pra porta " .. port) end
 	return true
-end
-
--- B.link(porta): liga este place em outro servidor por código (ex.: projeto novo). A troca acontece
--- logo depois de responder, pra resposta ainda ir pro servidor atual.
-function B.link(p)
-	p = tonumber(p)
-	if not p or p < 1024 or p > 65535 then error("porta inválida", 2) end
-	task.delay(0.5, function()
-		setPort(p)
-		if not enabled then setEnabled(true) end
-	end)
-	return "trocando pra porta " .. p
 end
 
 if ROLE == "edit" then
@@ -1654,7 +1637,6 @@ if ROLE == "edit" then
 	theme(root, "BackgroundColor3", SC.MainBackground)
 	theme(root, "ScrollBarImageColor3", SC.ScrollBar)
 
-	-- cabeçalho
 	local header = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40), LayoutOrder = 1, Parent = root })
 	-- logo: bloco azul com furo (Studio) e o anel do Claude passando pelo furo
 	local logo = new("Frame", { Size = UDim2.fromOffset(32, 32), Position = UDim2.fromOffset(0, 4), BackgroundColor3 = Color3.fromRGB(18, 20, 28), Parent = header }, { corner(8) })
@@ -1669,7 +1651,6 @@ if ROLE == "edit" then
 	local sub = label({ text = "Ponte com o Claude Code  ·  v" .. VERSION, dim = true, size = 12, pos = UDim2.fromOffset(42, 22), sizeUDim = UDim2.new(1, -42, 0, 16) })
 	sub.Parent = header
 
-	-- cartão de status
 	local card = new("Frame", { Size = UDim2.new(1, 0, 0, 64), LayoutOrder = 2, Parent = root }, { corner(8), stroke() })
 	theme(card, "BackgroundColor3", SC.InputFieldBackground)
 	local dot = new("Frame", { Size = UDim2.fromOffset(12, 12), Position = UDim2.new(0, 16, 0.5, -6), BackgroundColor3 = GRAY, Parent = card }, { corner(6) })
@@ -1679,14 +1660,12 @@ if ROLE == "edit" then
 	local stDetail = label({ text = "", dim = true, size = 12, pos = UDim2.fromOffset(40, 34), sizeUDim = UDim2.new(1, -52, 0, 16) })
 	stDetail.Parent = card
 
-	-- botão principal
 	local btn = new("TextButton", {
 		Size = UDim2.new(1, 0, 0, 38), LayoutOrder = 3, Font = Enum.Font.GothamBold, TextSize = 14,
 		AutoButtonColor = true, BackgroundColor3 = ACCENT, TextColor3 = WHITE, Text = "Conectar", Parent = root,
 	}, { corner(8) })
 	btn.Activated:Connect(function() setEnabled(not enabled) end)
 
-	-- porta
 	local portRow = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 4, Parent = root })
 	local pl = label({ text = "Porta do servidor", size = 13, pos = UDim2.fromOffset(0, 6), sizeUDim = UDim2.new(1, -110, 0, 18) })
 	pl.Parent = portRow
@@ -1700,7 +1679,6 @@ if ROLE == "edit" then
 		if not setPort(portBox.Text) then portBox.Text = tostring(port) end
 	end)
 
-	-- informações
 	local infoCard = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 5, Parent = root }, {
 		corner(8), stroke(), pad(12), new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }),
 	})
@@ -1715,7 +1693,6 @@ if ROLE == "edit" then
 	end
 	for i, n in ipairs({ "Projeto", "Pasta", "Place", "Scripts", "Playtest", "Último comando" }) do row(i, n) end
 
-	-- ajuda
 	local help = label({ text = "", dim = true, size = 12, order = 6, sizeUDim = UDim2.new(1, 0, 0, 0) })
 	help.TextWrapped = true
 	help.TextTruncate = Enum.TextTruncate.None

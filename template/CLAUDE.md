@@ -14,10 +14,11 @@ Você controla o Roblox Studio pela ponte StudioLink: o plugin no Studio convers
 - Caminho = hierarquia: `src/ServerScriptService/Combat/Damage.luau`
   `.server.luau` = Script · `.client.luau` = LocalScript · `.luau` = ModuleScript · pasta nova = Folder.
 - Apagar o arquivo apaga o script. Renomear/mover no Studio renomeia/move o arquivo.
-- Ao (re)conectar, Studio e disco são mesclados: o lado que mudou vence; se os dois mudaram, o Studio vence
-  e a versão do disco vai pra `.bridge/backup/`. Nada é perdido.
+- Ao (re)conectar, Studio e disco são mesclados. Só o disco mudou: o disco vence. O script mudou no Studio:
+  o painel do plugin pergunta qual versão fica e a outra vai pra `.bridge/backup/`; até a escolha, esses
+  scripts não sincronizam (`studiolink status` avisa). Nada é perdido.
 
-## Objetos (Parts, Models, UI, luzes, efeitos) — sem escrever código
+## Objetos (Parts, Models, UI, luzes, efeitos) sem escrever código
 UI: sempre Scale (nunca Offset) e sempre física no StarterGui; o LocalScript só acha os elementos e anima.
 Prefira as ferramentas MCP `studio_create`, `studio_set`, `studio_get`, `studio_delete`, `studio_clone`
 (ou o CLI: `studiolink create|set|get|delete|clone|export`). Aparece no Studio na hora e vira Ctrl+Z.

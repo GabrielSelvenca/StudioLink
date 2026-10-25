@@ -1,6 +1,6 @@
 {
   "name": "studiolink",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "private": true,
   "description": "Ponte entre o Claude Code e o Roblox Studio: sync de scripts, objetos por JSON, playtest, fuzz e Blender",
   "bin": {
