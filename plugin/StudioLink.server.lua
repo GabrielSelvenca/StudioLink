@@ -1486,6 +1486,10 @@ local function handle(cmd)
 	if t == "delete" then return Obj.delete(cmd) end
 	if t == "clone" then return Obj.clone(cmd) end
 	if ROLE == "edit" and t == "snapshot" then return sendSnapshot() end
+	if ROLE == "edit" and t == "resolved" then -- escolha feita (painel ou CLI): o painel mostra só o que falta
+		state.pending = type(cmd.remaining) == "table" and #cmd.remaining > 0 and cmd.remaining or nil
+		return { ok = true }
+	end
 	return { ok = false, error = "comando desconhecido aqui (" .. ROLE .. "): " .. tostring(t) }
 end
 

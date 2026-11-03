@@ -21,10 +21,11 @@ Você controla o Roblox Studio pela ponte StudioLink: o plugin no Studio convers
 - **Wally:** com `wally.toml`, rode `wally install` e pronto: `Packages/` aparece em `ReplicatedStorage.Packages` e
   `ServerPackages/` em `ServerScriptService.ServerPackages`, igual ao Rojo (`require(ReplicatedStorage.Packages.Nome)`).
   Rodar `wally install` de novo atualiza o Studio sozinho. Não copie pacotes pro `src/`.
-  Packages são só leitura: edição no Studio lá dentro não vai pro disco (o log avisa) e volta ao reconectar.
-- Ao (re)conectar, Studio e disco são mesclados. Só o disco mudou: o disco vence. O script mudou no Studio:
-  o painel do plugin pergunta qual versão fica e a outra vai pra `.bridge/backup/`; até a escolha, esses
-  scripts não sincronizam (`studiolink status` avisa). Nada é perdido.
+  Edição ao vivo no Studio dentro de Packages não vai pro disco (o log avisa; o `wally install` sobrescreveria).
+- Ao (re)conectar, Studio e disco são mesclados. Só o disco mudou: o disco vence. O script mudou no Studio
+  (inclusive nos Packages): a pessoa escolhe qual versão fica, no painel do plugin ou com
+  `studiolink resolve studio|disco [arquivo...]`, e a outra vai pra `.bridge/backup/`. Até a escolha, esses
+  scripts não sincronizam (`studiolink status` lista). Nada é perdido. Não escolha por conta própria: pergunte.
 
 ## Objetos (Parts, Models, UI, luzes, efeitos) sem escrever código
 UI: sempre Scale (nunca Offset) e sempre física no StarterGui; o LocalScript só acha os elementos e anima.

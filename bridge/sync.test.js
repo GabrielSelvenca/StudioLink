@@ -154,14 +154,25 @@ try {
   sync.fromStudio({ type: 'write', file: `${P}/Novo.luau`, source: 'novo' });
   assert.strictEqual(fs.readFileSync(path.join(dir, 'Packages/_Index/sleitnick_shake@1.1.0/shake/init.lua'), 'utf8'), 'shake');
   assert.ok(fs.existsSync(path.join(dir, 'Packages/Stance.lua')) && !fs.existsSync(path.join(dir, 'Packages/Novo.luau')));
-  // ao reconectar o disco vence nos Packages, e o que só existe no Studio (versão velha) sai
+  // ao reconectar, Studio e disco diferentes nos Packages viram escolha, como no resto (inclusive o que só existe no Studio)
+  const old = `${P}/_Index/sleitnick_shake@1.0.0/shake.luau`;
   const studio = [...w.keys()].map((file) => ({ file, source: sync.known.get(file) }));
   studio.find((s) => s.file === `${P}/Shake.luau`).source = 'mexido';
-  studio.push({ file: `${P}/_Index/sleitnick_shake@1.0.0/shake.luau`, source: 'velho' });
+  studio.push({ file: old, source: 'velho' });
   sent.length = 0;
   r = sync.applySnapshot(studio);
-  assert.strictEqual(r.perguntar.length, 0);
-  assert.deepStrictEqual(sent.map((c) => c.type + ' ' + c.file), [`delete ${P}/_Index/sleitnick_shake@1.0.0/shake.luau`, `write ${P}/Shake.luau`]);
+  assert.deepStrictEqual(r.perguntar.map((p) => p.file).sort(), [`${P}/Shake.luau`, old].sort());
+  assert.strictEqual(sent.length, 0);
+  // usar o disco: a versão velha sai do Studio e o link volta; o painel fica sem pendência
+  sync.resolveChoice('disco', [{ file: old }, { file: `${P}/Shake.luau` }]);
+  assert.deepStrictEqual(sent.filter((c) => c.type !== 'resolved').map((c) => c.type + ' ' + c.file), [`delete ${old}`, `write ${P}/Shake.luau`]);
+  assert.deepStrictEqual(sent.at(-1).remaining, []);
+  // manter o Studio: a escolha grava até nos Packages (até o próximo wally install)
+  studio.pop();
+  r = sync.applySnapshot(studio);
+  assert.deepStrictEqual(r.perguntar.map((p) => p.file), [`${P}/Shake.luau`]);
+  sync.resolveChoice('studio', [{ file: `${P}/Shake.luau` }]);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'Packages/Shake.lua'), 'utf8'), 'mexido');
   // wally install de novo (shake 1.1.0 -> 1.2.0): o Studio acompanha sozinho, apagando antes de criar
   fs.rmSync(path.join(dir, 'Packages/_Index/sleitnick_shake@1.1.0'), { recursive: true });
   pkg('Packages/Shake.lua', 'return require(script.Parent._Index["sleitnick_shake@1.2.0"]["shake"])');

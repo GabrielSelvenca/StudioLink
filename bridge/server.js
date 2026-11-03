@@ -121,7 +121,13 @@ async function handleCmd(body) {
       }
       if (isOnline('server') && !isOnline('client')) out.client = 'via server';
       return { ok: true, projeto: PROJECT, porta: PORT, studio: out, src: SRC, scripts: sync.known.size,
-        esperandoEscolha: sync.undecided.size ? `${sync.undecided.size} scripts diferentes entre Studio e disco: a pessoa escolhe no painel do StudioLink (não sincronizam até lá)` : undefined };
+        esperandoEscolha: sync.undecided.size ? `${sync.undecided.size} scripts diferentes entre Studio e disco: escolha no painel do StudioLink ou com "studiolink resolve studio|disco" (não sincronizam até lá)` : undefined,
+        diferentes: sync.undecided.size ? [...sync.undecided.keys()].slice(0, 30) : undefined };
+    }
+    case 'resolve': {
+      if (cmd.choice !== 'studio' && cmd.choice !== 'disco') return { ok: false, error: 'uso: resolve studio|disco [arquivo...]' };
+      const only = Array.isArray(cmd.files) && cmd.files.length ? new Set(cmd.files) : null;
+      return sync.resolveChoice(cmd.choice, [...sync.undecided.keys()].filter((file) => !only || only.has(file)).map((file) => ({ file })));
     }
     case 'logs': {
       const list = (cmd.role ? logs.filter((l) => l.role === cmd.role) : logs).slice(-(cmd.n || 100));
@@ -545,7 +551,12 @@ async function handler(req, res) {
       if (r.owner !== sid) r.running.clear(); // plugin novo: o que rodava no antigo morreu
       r.owner = sid;
       r.lastSeen = Date.now();
-      if (!r.online) { r.online = true; log(`Studio (${name}) conectado: ${place} [${sid}]`); }
+      if (!r.online) {
+        r.online = true;
+        log(`Studio (${name}) conectado: ${place} [${sid}]`);
+        // num restart rápido o plugin nem percebe que caiu e não manda o snapshot: o servidor pede
+        if (name === 'edit') enqueue('edit', { type: 'snapshot' });
+      }
       // Duas janelas no mesmo papel alternam o sid sem parar; uma troca isolada é só o plugin recarregando.
       if (r.sid && r.sid !== sid && Date.now() - (r.sidSeen || 0) < 15000) {
         r.flips = (r.flips || 0) + 1;

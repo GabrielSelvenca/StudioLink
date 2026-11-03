@@ -43,6 +43,7 @@ const HELP = `StudioLink: comandos de projeto (rode na pasta do jogo)
                                  os dois rodam numa cópia: nada do teste fica no place
   resync                         Studio → disco (refaz o snapshot dos scripts)
   pushall                        disco → Studio (manda todos os arquivos de src/)
+  resolve studio|disco [arq...]  escolhe a versão dos scripts diferentes na reconexão (sem arquivo = todos)
   selftest                       testa a ponte inteira (sync, execução, playtest)
   restart                        reinicia o servidor (studiolink start sobe de novo)
 
@@ -165,6 +166,7 @@ async function main() {
     }
     case 'insert': cmd = { type: 'insert', assetId: pos[0], parent: str('parent'), name: str('name') }; break;
     case 'resync': cmd = { type: 'snapshot' }; break;
+    case 'resolve': cmd = { type: 'resolve', choice: pos[0], files: pos.slice(1) }; break;
     case 'pushall': cmd = { type: 'pushall' }; break;
     case 'restart': cmd = { type: 'restart' }; break;
     case 'selftest': cmd = { type: 'selftest' }; break;

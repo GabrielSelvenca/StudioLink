@@ -75,12 +75,14 @@ Claude Code ──(MCP / studiolink)──► servidor do projeto (localhost:por
   do Rojo: `Packages/X.lua` é o ModuleScript `X`, `_Index/<scope_nome@versão>/<nome>/` é o pacote (o `tree.$path`
   do `default.project.json` dele, se tiver) e os `.lua` de dependência viram irmãos do pacote. Os `require` são os
   mesmos do Rojo. `wally install` de novo atualiza o Studio sozinho (apaga as versões que saíram).
-  Packages são só leitura: o `wally install` sobrescreve, então edição no Studio lá dentro não vai pro disco (só um
-  aviso no log), e ao reconectar o disco vence. Pra mudar um pacote, mude no repositório dele.
+  Edição ao vivo no Studio dentro de Packages não vai pro disco (só um aviso no log), porque o `wally install`
+  sobrescreveria. Ao reconectar, pacote diferente entre Studio e disco vira escolha, como qualquer script.
 - O servidor manda pro plugin pai antes de filho; se mesmo assim um filho chega primeiro, a Folder que o plugin cria
   no caminho é trocada pelo script quando ele chega (os filhos vão pra dentro dele).
-- Ao reconectar nada é apagado. Se um script mudou no Studio, o painel do plugin pergunta qual versão fica;
-  a outra vai pra `.bridge/backup/`.
+- Ao reconectar nada é apagado sem perguntar. Se um script mudou no Studio, você escolhe qual versão fica, no painel
+  do plugin ou com `studiolink resolve studio|disco [arquivo...]` (sem arquivo = todos); a outra vai pra
+  `.bridge/backup/`. Pacote do Wally que só existe no Studio também pergunta: usar o disco apaga ele do Studio.
+- O `studiolink restart` também refaz essa junção (o servidor pede o snapshot quando o Studio reconecta).
 - Upload de assets: crie uma User API Key em create.roblox.com → Open Cloud (permissão assets read + write) e rode
   `studiolink key` (salva no `.env` da pasta do StudioLink, fora do git, e vale pra todos os projetos).
 

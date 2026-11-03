@@ -9,8 +9,8 @@
 //   .lua vale igual a .luau; *.spec.lua(u) fica de fora (testes)
 //   pasta com default.project.json: o tree.$path dele é a instância (pacotes do Wally)
 // Com wally.toml no projeto, Packages/ aparece em ReplicatedStorage.Packages e ServerPackages/ em
-// ServerScriptService.ServerPackages. Esses são só leitura: o wally install sobrescreve, então edição no Studio
-// lá dentro não vai pro disco (só avisa no log) e, ao reconectar, o disco vence.
+// ServerScriptService.ServerPackages. Edição ao vivo no Studio lá dentro não vai pro disco (só avisa no log: o
+// wally install sobrescreveria). Ao reconectar, Studio e disco diferentes viram escolha, como no resto do src/.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -164,7 +164,8 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
   // Disco com conteúdo que o servidor não conhece (editado fora do sync) vai pro backup antes de ser trocado.
   // Com `tag`, a versão atual vai pro backup sempre (escolha no painel).
   function writeLocal(rel, source, tag) {
-    if (zoneOf(rel)) { warnOnce(`${rel} é do Wally: edição no Studio não vai pro disco (o wally install sobrescreve)`); return false; }
+    // nos Packages só a escolha no painel (tag) grava: edição ao vivo não, o wally install sobrescreveria
+    if (zoneOf(rel) && !tag) { warnOnce(`${zoneOf(rel).wire} é do Wally: edição no Studio não vai pro disco (o wally install sobrescreve)`); return false; }
     if (!lookup(rel) && /\/init(\.server|\.client)?\.luau$/.test(rel)) { warnOnce(`${rel}: script chamado init não vai pro disco (lá init.luau é o próprio pai)`); return false; }
     const abs = target(rel);
     const cur = read(abs);
@@ -179,7 +180,7 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
     return true;
   }
   function deleteLocal(rel) {
-    if (zoneOf(rel)) { warnOnce(`${rel} é do Wally: apagar no Studio não apaga no disco`); return; }
+    if (zoneOf(rel)) { warnOnce(`${zoneOf(rel).wire} é do Wally: apagar no Studio não apaga no disco`); return false; }
     const abs = target(rel);
     const cur = read(abs);
     if (cur !== undefined && cur !== known.get(rel)) backup(rel, stamp(), cur);
@@ -192,6 +193,7 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
       try { fs.rmdirSync(dir); } catch { break; }
       dir = path.dirname(dir);
     }
+    return true;
   }
 
   // Move `src` pra `dst`; se `dst` já é uma pasta, junta o conteúdo (os filhos às vezes chegam antes do pai).
@@ -246,15 +248,18 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
     if (body.type === 'write' && typeof body.source === 'string') {
       if (known.get(body.file) !== body.source && writeLocal(body.file, body.source)) log(`Studio → disco: ${body.file}`);
     } else if (body.type === 'delete') {
-      if (known.has(body.file) || fs.existsSync(target(body.file))) { deleteLocal(body.file); log(`Studio → disco: apagou ${body.file}`); }
+      if ((known.has(body.file) || fs.existsSync(target(body.file))) && deleteLocal(body.file)) log(`Studio → disco: apagou ${body.file}`);
     } else if (body.type === 'move') {
       moveLocal(body.file, body.to, body.source);
       log(`Studio → disco: ${body.file} → ${body.to}`);
     }
   }
 
+  const pendingList = () => [...undecided].map(([file, s]) => ({ file, velho: (seen.get(file) || []).includes(hash(s)) }));
+
   function resolveChoice(choice, files) {
     const tag = stamp();
+    const cmds = [];
     let n = 0;
     for (const f of files) {
       if (!undecided.has(f.file)) continue;
@@ -264,20 +269,23 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
         writeLocal(f.file, s, tag);
       } else {
         const d = read(target(f.file));
-        if (d === undefined) continue;
         backup(f.file, tag + '/studio', s);
-        setKnown(f.file, d);
-        enqueue('edit', { type: 'write', file: f.file, source: d });
+        if (d === undefined) { known.delete(f.file); cmds.push({ type: 'delete', file: f.file }); } // só existia no Studio
+        else { setKnown(f.file, d); cmds.push({ type: 'write', file: f.file, source: d }); }
       }
       n++;
     }
     saveState();
-    log(`escolha no Studio: ${choice === 'studio' ? 'manter o Studio' : 'usar o disco'} em ${n} scripts | a outra versão ficou em .bridge/backup/${tag}`);
+    for (const c of ordered(cmds)) enqueue('edit', c);
+    // o painel do plugin mostra só o que ainda falta (a escolha pode ter vindo do CLI)
+    enqueue('edit', { type: 'resolved', remaining: pendingList() });
+    log(`escolha: ${choice === 'studio' ? 'manter o Studio' : 'usar o disco'} em ${n} scripts | a outra versão ficou em .bridge/backup/${tag}`);
     return { ok: true, resolvidos: n };
   }
 
   // Ao conectar: junta Studio e disco. Existe só de um lado → copia pro outro (na reconexão nada é apagado:
-  // o Studio pode ser outra versão do place; apagar só sincroniza ao vivo). Nos Packages do Wally o disco manda.
+  // o Studio pode ser outra versão do place; apagar só sincroniza ao vivo). Pacote do Wally que só existe no Studio
+  // não tem como ir pro disco sozinho: vira escolha (usar o disco apaga do Studio).
   function applySnapshot(scripts) {
     undecided.clear();
     map = null;
@@ -294,14 +302,14 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
     }
     const files = new Set([...S.keys(), ...D.keys()]);
     const toStudio = [];
-    const st = { iguais: 0, studioParaDisco: 0, discoParaStudio: 0, perguntar: 0, apagadosNoStudio: 0 };
+    const st = { iguais: 0, studioParaDisco: 0, discoParaStudio: 0, perguntar: 0 };
     for (const rel of files) {
       if (unreadable.has(rel)) continue;
       const s = S.get(rel), d = D.get(rel), k = known.get(rel);
       const zone = zoneOf(rel);
       try {
         if (s !== undefined && d !== undefined) {
-          const w = zone && s !== d ? 'disco' : winner(s, d, k);
+          const w = winner(s, d, k);
           if (w === 'iguais') { setKnown(rel, s); st.iguais++; }
           else if (w === 'disco') { setKnown(rel, d); toStudio.push({ type: 'write', file: rel, source: d }); st.discoParaStudio++; }
           else {
@@ -310,9 +318,12 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
             st.perguntar++;
           }
         } else if (s !== undefined && zone) {
-          // versão velha de pacote no place; sem a pasta no disco (wally install não rodou) o Studio fica como está
-          if (zone.exists) { toStudio.push({ type: 'delete', file: rel }); st.apagadosNoStudio++; }
-          else warnOnce(`${zone.wire} está no Studio mas não no disco: rode wally install`);
+          // pacote só no Studio (versão velha?): a pessoa escolhe; sem a pasta no disco (wally install não rodou) fica como está
+          if (zone.exists) {
+            undecided.set(rel, s);
+            perguntar.push({ file: rel, velho: (seen.get(rel) || []).includes(hash(s)) });
+            st.perguntar++;
+          } else warnOnce(`${zone.wire} está no Studio mas não no disco: rode wally install`);
         } else if (s !== undefined) {
           writeLocal(rel, s); st.studioParaDisco++;
         } else {
