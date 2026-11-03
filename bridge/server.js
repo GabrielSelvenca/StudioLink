@@ -104,7 +104,7 @@ function addLog(role, kind, msg) {
 }
 
 const sync = createSync({
-  SRC, BACKUP: path.join(ROOT, '.bridge', 'backup'), STATE: path.join(ROOT, '.bridge', 'state.json'), log, enqueue, isOnline,
+  SRC, ROOT, BACKUP: path.join(ROOT, '.bridge', 'backup'), STATE: path.join(ROOT, '.bridge', 'state.json'), log, enqueue, isOnline,
 });
 
 // ---------------------------------------------------------------- comandos do CLI

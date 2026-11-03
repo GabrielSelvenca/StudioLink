@@ -1276,6 +1276,13 @@ local function applyWrite(file, src)
 			s.Source = src
 			lastSent[s] = src
 			s.Parent = parent
+			-- Folder com o mesmo nome (o filho chegou antes do pai, ou o script trocou de classe): os filhos vêm pro script
+			for _, f in ipairs(parent:GetChildren()) do
+				if f.Name == leaf and f.ClassName == "Folder" then
+					for _, c in ipairs(f:GetChildren()) do c.Parent = s end
+					f.Parent = nil
+				end
+			end
 		end
 		return { ok = true }
 	end)
@@ -1286,13 +1293,56 @@ local function applyDelete(file)
 	if not cls then return { ok = false } end
 	local parent = locateParent(segs, false)
 	local s = parent and findScript(parent, segs[#segs], cls)
-	if s then rec("Claude sync: apagar " .. file, function() s.Parent = nil end) end
+	if s then rec("Claude sync: apagar " .. file, function()
+		-- scripts filhos continuam no disco (Kit/init.luau apagado, Kit/A.luau não): o script vira uma Folder com eles
+		for _, d in ipairs(s:GetDescendants()) do
+			if SUFFIX[d.ClassName] then
+				local f = Instance.new("Folder")
+				f.Name = s.Name
+				for _, c in ipairs(s:GetChildren()) do c.Parent = f end
+				f.Parent = parent
+				break
+			end
+		end
+		s.Parent = nil
+		-- pastas que ficaram vazias saem junto, como no disco
+		local cur = parent
+		while cur and cur.ClassName == "Folder" and not syncRoots[cur] and #cur:GetChildren() == 0 do
+			local up = cur.Parent
+			cur.Parent = nil
+			cur = up
+		end
+	end) end
 	return { ok = true }
 end
 
 local function syncActive()
 	return ROLE == "edit" and enabled and connected and not RunService:IsRunning()
 end
+
+-- Renomeado, movido ou apagado: manda "move" (o servidor leva o arquivo e a pasta dos filhos juntos, no layout em
+-- que estavam) ou "delete". Pai antes dos filhos: depois que a pasta do pai mudou, o move dos filhos não faz nada.
+local function slashes(f) return select(2, string.gsub(f, "/", "")) end
+local function checkMoved(list)
+	local items = {}
+	for _, s in ipairs(list) do
+		local file = tracked[s]
+		local nf = file and s.Parent and fileOf(s) or nil
+		if file and nf ~= file then table.insert(items, { s, file, nf }) end
+	end
+	table.sort(items, function(a, b) return slashes(a[2]) < slashes(b[2]) end)
+	for _, it in ipairs(items) do
+		local s, file, nf = it[1], it[2], it[3]
+		if nf then
+			untrack(s, false)
+			local ok = request("POST", "/sync", { type = "move", file = file, to = nf, source = editorSource(s) })
+			track(s, ok ~= nil) -- não chegou: fica marcado pra gravar de novo
+		else
+			untrack(s, true)
+		end
+	end
+end
+local removing = {}
 
 if ROLE == "edit" then
 	for _, name in ipairs(SYNC_SERVICES) do
@@ -1302,8 +1352,18 @@ if ROLE == "edit" then
 			svc.DescendantAdded:Connect(function(d)
 				if syncActive() and SUFFIX[d.ClassName] then track(d, false) end
 			end)
+			-- mover dispara Removing e depois Added: decide no fim do frame se foi mover ou apagar
 			svc.DescendantRemoving:Connect(function(d)
-				if syncActive() and tracked[d] then untrack(d, true) end
+				if not (syncActive() and tracked[d]) then return end
+				if not next(removing) then
+					task.defer(function()
+						local list = {}
+						for s in pairs(removing) do table.insert(list, s) end
+						table.clear(removing)
+						checkMoved(list)
+					end)
+				end
+				removing[d] = true
 			end)
 		end
 	end
@@ -1340,15 +1400,8 @@ if ROLE == "edit" then
 				for _, s in ipairs(retry) do dirty[s] = true end
 				if tick % 5 == 0 then
 					local list = {}
-					for s, file in pairs(tracked) do table.insert(list, { s, file }) end
-					for _, item in ipairs(list) do
-						local s, file = item[1], item[2]
-						local nf = s.Parent and fileOf(s) or nil
-						if nf ~= file then
-							untrack(s, true)
-							if nf then track(s, false) end
-						end
-					end
+					for s in pairs(tracked) do table.insert(list, s) end
+					checkMoved(list)
 				end
 			end
 		end

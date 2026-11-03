@@ -5,7 +5,8 @@ Este repositório é o próprio StudioLink, não um jogo. Instalado no PC com `i
 - `bin/studiolink.js`: comando global. `init`/`start`/`plugin`/`mcp`/`version`; o resto vai pra `bridge/cli.js`.
 - `bridge/project.js`: acha o projeto subindo pastas até um `studiolink.json`. Versão vem do `package.json`.
 - `bridge/server.js`: um por projeto (cwd = projeto). Mudou? `studiolink restart` no projeto.
-- `bridge/sync.js`: sync de `src/` com o Studio (junção ao reconectar, backups). Teste: `node bridge/sync.test.js`.
+- `bridge/sync.js`: sync de `src/` e dos Packages do Wally com o Studio (junção ao reconectar, backups). O plugin
+  fala em caminhos do Studio; o `scan()` traduz o disco (layout do StudioLink, do Rojo, Wally). Teste: `node bridge/sync.test.js`.
 - `bridge/mcp.js`: registrado uma vez com `claude mcp add -s user`; o projeto é a pasta onde o Claude abriu.
 - `plugin/StudioLink.server.lua`: depois de mudar, `studiolink plugin` (o Studio recarrega sozinho).
   A versão do plugin instalado sai do `package.json`.

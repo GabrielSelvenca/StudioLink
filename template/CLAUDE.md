@@ -13,7 +13,15 @@ Você controla o Roblox Studio pela ponte StudioLink: o plugin no Studio convers
 - Ficam espelhados em `src/` e sincronizam nos dois sentidos. Edite os arquivos; não crie scripts via `run`.
 - Caminho = hierarquia: `src/ServerScriptService/Combat/Damage.luau`
   `.server.luau` = Script · `.client.luau` = LocalScript · `.luau` = ModuleScript · pasta nova = Folder.
-- Apagar o arquivo apaga o script. Renomear/mover no Studio renomeia/move o arquivo.
+- Script com filhos: `Kit.luau` + pasta `Kit/`. O layout do Rojo também vale: `Kit/init.luau` (ou `init.server.luau`,
+  `init.client.luau`) é o script e o resto da pasta são os filhos. `.lua` vale igual a `.luau`; `*.spec.lua(u)` é ignorado.
+  Script editado no Studio grava no arquivo que já existe (`Kit/init.luau` continua `Kit/init.luau`); script novo
+  criado no Studio vira `Nome.luau`.
+- Apagar o arquivo apaga o script. Renomear/mover no Studio renomeia/move o arquivo e a pasta dos filhos juntos.
+- **Wally:** com `wally.toml`, rode `wally install` e pronto: `Packages/` aparece em `ReplicatedStorage.Packages` e
+  `ServerPackages/` em `ServerScriptService.ServerPackages`, igual ao Rojo (`require(ReplicatedStorage.Packages.Nome)`).
+  Rodar `wally install` de novo atualiza o Studio sozinho. Não copie pacotes pro `src/`.
+  Packages são só leitura: edição no Studio lá dentro não vai pro disco (o log avisa) e volta ao reconectar.
 - Ao (re)conectar, Studio e disco são mesclados. Só o disco mudou: o disco vence. O script mudou no Studio:
   o painel do plugin pergunta qual versão fica e a outra vai pra `.bridge/backup/`; até a escolha, esses
   scripts não sincronizam (`studiolink status` avisa). Nada é perdido.

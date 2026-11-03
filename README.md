@@ -66,6 +66,19 @@ Claude Code ──(MCP / studiolink)──► servidor do projeto (localhost:por
                                          src/  ⇄  scripts do jogo
 ```
 - Só aceita conexões locais e bloqueia requisições de navegador.
+- Layout dos scripts em `src/`: `Kit.luau` + pasta `Kit/` (formato do StudioLink) ou o do Rojo, `Kit/init.luau`
+  (`init.lua`, `init.server.luau`, `init.client.luau`) com os filhos na mesma pasta. `.lua` vale igual a `.luau`
+  (`.server.lua`, `.client.lua`) e `*.spec.lua(u)` fica de fora. Editar no Studio grava no arquivo que já existe;
+  renomear/mover leva a pasta inteira; script novo criado no Studio sai no formato do StudioLink.
+- **Wally** (sem conversão, sem Rojo): com `wally.toml` na pasta do projeto, `Packages/` vira
+  `ReplicatedStorage.Packages` e `ServerPackages/` vira `ServerScriptService.ServerPackages`, com o `_Index` igual ao
+  do Rojo: `Packages/X.lua` é o ModuleScript `X`, `_Index/<scope_nome@versão>/<nome>/` é o pacote (o `tree.$path`
+  do `default.project.json` dele, se tiver) e os `.lua` de dependência viram irmãos do pacote. Os `require` são os
+  mesmos do Rojo. `wally install` de novo atualiza o Studio sozinho (apaga as versões que saíram).
+  Packages são só leitura: o `wally install` sobrescreve, então edição no Studio lá dentro não vai pro disco (só um
+  aviso no log), e ao reconectar o disco vence. Pra mudar um pacote, mude no repositório dele.
+- O servidor manda pro plugin pai antes de filho; se mesmo assim um filho chega primeiro, a Folder que o plugin cria
+  no caminho é trocada pelo script quando ele chega (os filhos vão pra dentro dele).
 - Ao reconectar nada é apagado. Se um script mudou no Studio, o painel do plugin pergunta qual versão fica;
   a outra vai pra `.bridge/backup/`.
 - Upload de assets: crie uma User API Key em create.roblox.com → Open Cloud (permissão assets read + write) e rode
@@ -75,7 +88,7 @@ Claude Code ──(MCP / studiolink)──► servidor do projeto (localhost:por
 ```
 bin/studiolink.js      comando global (init, start, plugin, mcp + CLI)
 bridge/server.js       servidor de cada projeto (fila de comandos, HTTP)
-bridge/sync.js         sync de src/ com o Studio (teste: node bridge/sync.test.js)
+bridge/sync.js         sync de src/ e dos Packages do Wally com o Studio (teste: node bridge/sync.test.js)
 bridge/cli.js          comandos de terminal
 bridge/mcp.js          ferramentas MCP (studio_*, blender_run...)
 bridge/blender/rbx.py  biblioteca de modelagem pro Blender
