@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createSync } = require('./sync');
+const { createSync, SERVICES, ensureServices } = require('./sync');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studiolink-sync-'));
 const SRC = path.join(dir, 'src');
@@ -185,6 +185,12 @@ try {
     `write ${P}/Shake.luau`,
     `write ${P}/_Index/sleitnick_shake@1.2.0/shake.luau`,
   ]);
+  // os serviços existem sempre, mesmo vazios; o resto que ficou vazio some
+  ensureServices(SRC);
+  fs.mkdirSync(abs('ReplicatedStorage/Vazia'), { recursive: true });
+  sync.applySnapshot([]);
+  for (const s of SERVICES) assert.ok(fs.existsSync(abs(s)), s + ' sumiu');
+  assert.ok(!fs.existsSync(abs('ReplicatedStorage/Vazia')), 'pasta vazia comum ficou');
   console.log('sync: ok');
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });

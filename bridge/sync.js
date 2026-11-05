@@ -19,6 +19,13 @@ const DEVICE = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i; // nomes que o Windows
 const hash = (src) => crypto.createHash('sha1').update(src).digest('hex');
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 const WALLY = [['Packages', 'ReplicatedStorage/Packages'], ['ServerPackages', 'ServerScriptService/ServerPackages']];
+// Os serviços do Roblox que o sync acompanha: a pasta de cada um sempre existe em src/, mesmo vazia, pra ninguém
+// ter que lembrar onde as coisas vão.
+const SERVICES = [
+  'Workspace', 'ReplicatedFirst', 'ReplicatedStorage', 'ServerScriptService', 'ServerStorage', 'StarterGui', 'StarterPack',
+  'StarterPlayer/StarterCharacterScripts', 'StarterPlayer/StarterPlayerScripts', 'Lighting', 'SoundService', 'TextChatService',
+];
+const ensureServices = (src) => { for (const s of SERVICES) fs.mkdirSync(path.join(src, ...s.split('/')), { recursive: true }); };
 const depth = (rel) => rel.split('/').length;
 const instOf = (rel) => rel.replace(/(\.server|\.client)?\.luau$/, ''); // "A/B.server.luau" -> "A/B"
 
@@ -151,9 +158,10 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
   // Onde gravar: o arquivo que já existe (init.luau, .lua...) ou, se é novo, o layout do StudioLink.
   const target = (rel) => { toAbs(rel); return lookup(rel) || place(rel); };
 
+  const KEEP = new Set(SERVICES.map((s) => path.join(SRC, ...s.split('/'))));
   function removeEmptyDirs(dir) {
     for (const e of list(dir)) if (e.isDirectory()) removeEmptyDirs(path.join(dir, e.name));
-    if (dir !== SRC) { try { fs.rmdirSync(dir); } catch {} }
+    if (dir !== SRC && !KEEP.has(dir)) { try { fs.rmdirSync(dir); } catch {} }
   }
   function backup(rel, tag, source) {
     const dst = path.join(BACKUP, tag, ...rel.split('/'));
@@ -404,7 +412,7 @@ function createSync({ SRC, ROOT = path.dirname(SRC), BACKUP, STATE, log, enqueue
     }
   }
 
-  return { known, undecided, toAbs, scan, setKnown, writeLocal, deleteLocal, moveLocal, fromStudio, resolveChoice, applySnapshot, pushAll, rescan, start: watch };
+  return { known, undecided, toAbs, scan, setKnown, writeLocal, deleteLocal, moveLocal, fromStudio, resolveChoice, applySnapshot, pushAll, rescan, start: () => { ensureServices(SRC); watch(); } };
 }
 
-module.exports = { createSync, winner, stamp, scriptName };
+module.exports = { createSync, winner, stamp, scriptName, SERVICES, ensureServices };

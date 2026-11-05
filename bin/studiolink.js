@@ -86,7 +86,7 @@ async function init(args) {
   fs.writeFileSync(cfgFile, JSON.stringify({ ...cfg, port, name }, null, 2) + '\n');
 
   const made = ['studiolink.json'];
-  for (const d of ['src/ServerScriptService', 'src/ReplicatedStorage', 'src/StarterPlayer/StarterPlayerScripts', 'tools/build']) {
+  for (const d of [...require('../bridge/sync').SERVICES.map((s) => 'src/' + s), 'tools/build']) {
     if (!fs.existsSync(path.join(dir, d))) { fs.mkdirSync(path.join(dir, d), { recursive: true }); made.push(d + '/'); }
   }
   const tpl = (f) => fs.readFileSync(path.join(PKG, 'template', f), 'utf8');

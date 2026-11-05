@@ -11,6 +11,7 @@ Você controla o Roblox Studio pela ponte StudioLink: o plugin no Studio convers
 
 ## Scripts do jogo
 - Ficam espelhados em `src/` e sincronizam nos dois sentidos. Edite os arquivos; não crie scripts via `run`.
+  `src/` sempre tem a pasta de cada serviço do Roblox (ReplicatedStorage, ServerScriptService, StarterGui...), mesmo vazia.
 - Caminho = hierarquia: `src/ServerScriptService/Combat/Damage.luau`
   `.server.luau` = Script · `.client.luau` = LocalScript · `.luau` = ModuleScript · pasta nova = Folder.
 - Script com filhos: `Kit.luau` + pasta `Kit/`. O layout do Rojo também vale: `Kit/init.luau` (ou `init.server.luau`,
